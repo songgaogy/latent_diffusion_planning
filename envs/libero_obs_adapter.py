@@ -10,7 +10,7 @@ LIBERO env returns per-step:
     object                         (D,)
     ...
 
-The LDP dataset (preprocessed at /home/dodo/data1/libero/256/) stores instead:
+The LDP preprocessed LIBERO dataset stores instead:
     agentview_rgb, eye_in_hand_rgb, ee_pos, ee_ori (3-d Euler), ee_states
     (=concat(ee_pos, ee_ori), 6-d), gripper_states (2-d), joint_states (7-d)
 

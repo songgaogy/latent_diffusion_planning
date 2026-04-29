@@ -15,7 +15,9 @@ bash scripts/preprocess_libero.bash \
 
 3. Generate/write `latent stats` into the latent YAML
 ```bash
-/home/dodo/miniconda3/envs/ldp/bin/python scripts/compute_libero_latent_stats.py \
+source scripts/env_helpers.bash
+PY="$(resolve_ldp_python)"
+"$PY" scripts/compute_libero_latent_stats.py \
   --latent experiments/libero_long/preproc01/latent.hdf5
 ```
 

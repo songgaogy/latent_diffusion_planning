@@ -8,9 +8,9 @@ experiment_folder: libero_vae
 experiment_name: vae_all256
 
 # train params (256x256 imgs are 16x heavier than rm_lift's 64x64; lower the bs)
-batch_size: 16
-n_workers: 8
-device_prefetch_size: 2
+batch_size: 64
+n_workers: 16
+device_prefetch_size: 4
 n_grad_steps: 300000
 log_every_step: 50
 dump_every_step: 200
@@ -19,13 +19,13 @@ lr: 1e-4
 end_lr: 1e-6
 
 # eval params
-eval_every_step: 5000
+eval_every_step: 25000
 eval_traj_frames: 32
 n_eval_episodes: 4
 n_eval_processes: 4
-render_video: false
+render_video: true
 n_videos: 5
-save_verbose: false
+save_verbose: true
 
 # data params (single-frame VAE training)
 horizon: 1

@@ -28,8 +28,27 @@ if str(_REPO_ROOT) not in _sys.path:
 from envs.libero_proto import read_frame, write_frame
 
 
-_LIBERO_PYTHON_DEFAULT = "/home/dodo/miniconda3/envs/libero/bin/python"
-_LIBERO_REPO_DEFAULT = "/home/dodo/Documents/LIBERO"
+_LIBERO_PYTHON_CANDIDATES = (
+    Path.home() / "anaconda3" / "envs" / "libero" / "bin" / "python",
+    Path.home() / "miniconda3" / "envs" / "libero" / "bin" / "python",
+    Path("/home/anaconda3/envs/libero/bin/python"),
+)
+_LIBERO_REPO_CANDIDATES = (
+    Path.home() / "Documents" / "LIBERO",
+    Path("/data/LIBERO"),
+)
+
+
+def _resolve_first_path(candidates, kind: str, executable: bool = False) -> str:
+    for path in candidates:
+        if executable:
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path)
+        elif path.is_dir():
+            return str(path)
+    env_name = "LIBERO_PYTHON" if executable else "LIBERO_REPO"
+    checked = ", ".join(str(p) for p in candidates)
+    raise FileNotFoundError(f"Could not find {kind}. Set {env_name}; checked: {checked}")
 
 
 def _drain_to_log(stream, log_path: Path):
@@ -75,8 +94,12 @@ class LiberoRemoteEnv:
         self.controller = controller
         self.horizon = horizon
 
-        py = libero_python or os.environ.get("LIBERO_PYTHON", _LIBERO_PYTHON_DEFAULT)
-        repo = libero_repo or os.environ.get("LIBERO_REPO", _LIBERO_REPO_DEFAULT)
+        py = libero_python or os.environ.get("LIBERO_PYTHON") or _resolve_first_path(
+            _LIBERO_PYTHON_CANDIDATES, "LIBERO python", executable=True
+        )
+        repo = libero_repo or os.environ.get("LIBERO_REPO") or _resolve_first_path(
+            _LIBERO_REPO_CANDIDATES, "LIBERO repo"
+        )
         log_dir = Path(log_dir or os.environ.get("LIBERO_LOG_DIR", "/tmp/libero_remote_env_logs"))
         wid = worker_id if worker_id is not None else os.getpid()
         self._log_path = log_dir / f"worker_{wid}_task{task_id}.log"

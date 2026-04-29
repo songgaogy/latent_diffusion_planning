@@ -8,8 +8,8 @@ Official implementation of *Latent Diffusion Planning* (Xie et al., 2025, arXiv:
 
 ## Environment & Execution
 
-- Conda env name is `ldp`. Always run Python via `/home/dodo/miniconda3/envs/ldp/bin/python` (or activate `ldp` first). Do not assume the system `python`.
-- Logging: prefer WandB. User's wandb settings: `WANDB_NAME=songgao-personal`, always export `WANDB_MODE=offline`. The codebase defaults to `use_wandb: false`; flip the flag in CLI/yaml if logging is desired. Note: `train_bc.py:248` has a literal `YOUR_ENTITY` placeholder — replace before enabling wandb.
+- Conda env name is `ldp`. Use the repo runners under `scripts/`, which resolve the env python automatically; for direct commands set `PY=/path/to/envs/ldp/bin/python` or activate `ldp` first. Do not assume the system `python`.
+- Logging: prefer WandB. User's wandb settings: `WANDB_NAME=songgao-personal`, always export `WANDB_MODE=offline`. The codebase defaults to `use_wandb: false`; flip the flag in CLI/yaml if logging is desired. Active entry points read `WANDB_ENTITY`, falling back to `WANDB_NAME`.
 - GPU selection: scripts in `scripts/` set `CUDA_VISIBLE_DEVICES=0,1`. JAX picks up all visible devices and shards batches positionally (`train_bc.py:74`); `batch_size % n_devices == 0` is asserted.
 - For commands with long CLI parameters, add a `.bash` runner under `scripts/` and tell the user how to invoke it (per AGENTS.md convention; existing examples: `redundant/train_vae_encoder.sh`, `redundant/train_bc.sh`, `redundant/preprocess_vae_data.sh`, `scripts/train_mixed_bc.sh` — the last is mis-named: it actually runs `collect_data.py`).
 

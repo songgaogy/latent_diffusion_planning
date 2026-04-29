@@ -1,7 +1,9 @@
-export CUDA_VISIBLE_DEVICES=0,1
-cd /home/dodo/Documents/latent_diffusion_planning
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
+cd "$(dirname "$0")/.."
+source scripts/env_helpers.bash
+PY="$(resolve_ldp_python)"
 
-python collect_data.py \
+"$PY" collect_data.py \
     experiment_folder=FOLDER \
     experiment_name=NAME \
     folder_tag=1 \

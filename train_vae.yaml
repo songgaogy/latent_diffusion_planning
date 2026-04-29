@@ -8,7 +8,7 @@ experiment_name: test
 
 # train params
 batch_size: 128
-n_workers: 2
+n_workers: 16
 n_grad_steps: 300000
 log_every_step: 10
 dump_every_step: 200

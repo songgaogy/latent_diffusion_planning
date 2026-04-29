@@ -1,7 +1,8 @@
 """Smoke tests for data/libero_data.py.
 
 Run:
-  /home/dodo/miniconda3/envs/ldp/bin/python -m pytest test/test_libero_data.py -q
+  PY=/path/to/envs/ldp/bin/python
+  "$PY" -m pytest test/test_libero_data.py -q
 
 These tests only inspect a single libero_10 hdf5 and use very small batches —
 they're meant to catch the multi-file indexing / missing-num_samples / shape

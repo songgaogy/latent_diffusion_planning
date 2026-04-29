@@ -3,6 +3,7 @@ import numpy as np
 import os
 from pathlib import Path
 import time
+import wandb
 
 import jax
 import jax.numpy as jnp
@@ -250,7 +251,8 @@ def main(cfg):
     # create logger
     if cfg.use_wandb:
         import omegaconf
-        wandb.init(entity=YOUR_ENTITY, project='latent_diffusion_planning', group=cfg.experiment_folder,
+        wandb_entity = os.environ.get("WANDB_ENTITY", os.environ.get("WANDB_NAME", "songgao-personal"))
+        wandb.init(entity=wandb_entity, project='latent_diffusion_planning', group=cfg.experiment_folder,
                     name=cfg.experiment_name,tags=[cfg.experiment_folder], sync_tensorboard=True)
         wandb.config = omegaconf.OmegaConf.to_container(
             cfg, resolve=True, throw_on_missing=False

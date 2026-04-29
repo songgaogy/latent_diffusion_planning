@@ -1,6 +1,6 @@
 """Server worker for the LIBERO eval bridge.
 
-Runs in /home/dodo/miniconda3/envs/libero/bin/python.
+Runs in the LIBERO python selected by envs.libero_remote_env.
 
 Communication: length-prefixed pickle frames over stdin (commands) / stdout
 (responses). Stderr stays unbuffered for log drainage by the parent.

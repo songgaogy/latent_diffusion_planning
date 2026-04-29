@@ -14,7 +14,9 @@
 #       restore_snapshot_path=$(pwd)/experiments/libero_vae/vae_all256/ckpt/100000.ckpt
 #
 # After this finishes, run:
-#   /home/dodo/miniconda3/envs/ldp/bin/python scripts/compute_libero_latent_stats.py \
+#   source scripts/env_helpers.bash
+#   PY="$(resolve_ldp_python)"
+#   "$PY" scripts/compute_libero_latent_stats.py \
 #       --latent experiments/<folder>/<name>/latent.hdf5
 # and paste the printed min/max values into data/cfg/libero_long/latent_img.yaml.
 
@@ -23,9 +25,10 @@ cd "$(dirname "$0")/.."
 
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_NAME=${WANDB_NAME:-songgao-personal}
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 
-PY=${PY:-/home/dodo/miniconda3/envs/ldp/bin/python}
+source scripts/env_helpers.bash
+PY="$(resolve_ldp_python)"
 
 set -x
 "$PY" process_sdvae_data.py \

@@ -40,7 +40,7 @@ First, create your conda environment:
 conda env create -f env.yml
 
 # NOTE: since most of machines today suits better for JAX and PyTorch in higher version, so we perform update
-pip install --upgrade jax torch
+pip install --upgrade jax torch torchvision
 ```
 
 Download the [Robomimic Dataset](https://robomimic.github.io/docs/datasets/robomimic_v0.1.html) and re-render observations at 64x64. Make sure the robosuite version is consistent across dataset generation and policy evaluation. Generate [ALOHA Data](https://github.com/tonyzhaozh/act) via `MUJOGO_GL=egl python3 collect_aloha_scripted_demos.py --task_name sim_transfer_cube_scripted --dataset_path YOUR_PATH --num_episodes NUM_EPISODE`

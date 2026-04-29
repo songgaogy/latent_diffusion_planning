@@ -1,0 +1,56 @@
+defaults:
+  - agent: ldp_agent
+  - data: cfg/libero_long/latent_img
+  - _self_
+
+# experiment
+experiment_folder: libero_long
+experiment_name: ldp_long01
+
+# train params
+batch_size: 64
+n_workers: 4
+n_grad_steps: 500000
+log_every_step: 50
+dump_every_step: 200
+warmup_steps: 1000
+lr: 1e-4
+end_lr: 1e-6
+
+# eval params
+eval_every_step: 25000
+n_eval_episodes: 20
+n_eval_processes: 5
+render_video: false
+n_videos: 5
+save_verbose: false
+
+# data params (planner sees an obs window then plans the future obs window)
+horizon: 9
+obs_horizon: 1
+action_horizon: 4
+idm_horizon: 4
+
+# snapshot
+snapshot_dir: ./ckpt
+save_every_step: 50000
+restore_snapshot_path: null
+restore_keys: []
+
+# misc
+seed: 1
+save_video: false
+use_tb: true
+use_wandb: false
+name: train_libero_long
+
+# Override agent fields. Default agent yaml uses vae_feature_dim=16 (sized for
+# 64x64 inputs); libero is 256x256 so SD-VAE produces 32x32x4=4096-d latents.
+# 256 (= 8x8x4) is a safe starting subset; bump to 1024 if plan_viz is too coarse.
+agent:
+  vae_feature_dim: 256
+  vae_pretrain_path: null
+
+hydra:
+  run:
+    dir: ./experiments/${experiment_folder}/${experiment_name}

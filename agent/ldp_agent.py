@@ -78,6 +78,17 @@ class LDPAgent(flax.struct.PyTreeNode):
         elif self.config['vae_feature_dim'] == 64:
             feats = feats[:, :, :64]
             z = feats.reshape(B * H, 4, 4, 4)
+        elif self.config['vae_feature_dim'] == 256:
+            # 256x256 SD-VAE input -> 32x32x4 latent; take first 256 flat dims
+            # reshaped as 8x8x4 for the (learned, upsampling) decoder.
+            feats = feats[:, :, :256]
+            z = feats.reshape(B * H, 8, 8, 4)
+        elif self.config['vae_feature_dim'] == 1024:
+            feats = feats[:, :, :1024]
+            z = feats.reshape(B * H, 16, 16, 4)
+        elif self.config['vae_feature_dim'] == 4096:
+            # full 256x256 SD-VAE latent (no truncation)
+            z = feats[:, :, :4096].reshape(B * H, 32, 32, 4)
         key = self.config['rgb_obs'][0]
         z = unnormalize_obs({key: z}, self.obs_normalization['obs'])[key]
         reconstruct = self.vae_module.apply({"params": self.vae_params}, z, method=self.vae_module.decode).sample
@@ -90,8 +101,12 @@ class LDPAgent(flax.struct.PyTreeNode):
         lowdim_obs_cond = jnp.concatenate([batch[key] for key in self.config['lowdim_obs']], axis=-1).astype(jnp.float32)
         B, H = lowdim_obs_cond.shape[:2]
         lowdim_obs_cond = lowdim_obs_cond.reshape(-1, *lowdim_obs_cond.shape[2:])
-        init_obs = jnp.concatenate([batch[key] for key in self.config['rgb_obs']], axis=1)
-        image_features = init_obs.reshape(B, H, -1)
+        # flatten each per-camera latent to (B, H, -1) BEFORE concatenating so
+        # that two cameras stack along the feature axis, not along time.
+        # (Concatenating raw rank-5 latents on axis=1 misaligns time when later
+        # reshaped to (B, H, -1).)
+        per_cam = [batch[key].reshape(B, H, -1) for key in self.config['rgb_obs']]
+        image_features = jnp.concatenate(per_cam, axis=-1)
         lowdim_obs_cond = lowdim_obs_cond.reshape(B, H, -1)
         obs_cond = jnp.concatenate([image_features, lowdim_obs_cond], axis=-1)
         return obs_cond
@@ -102,10 +117,10 @@ class LDPAgent(flax.struct.PyTreeNode):
         B, H = lowdim_obs_cond.shape[:2]
         lowdim_obs_cond = lowdim_obs_cond.reshape(-1, *lowdim_obs_cond.shape[2:])
 
-        # get image features
-        init_obs = jnp.concatenate([batch[key] for key in rgb_obs], axis=1)
-        image_features = init_obs.reshape(B, H, -1)
-        
+        # See get_obs_cond: flatten per-camera then concat on feature axis.
+        per_cam = [batch[key].reshape(B, H, -1) for key in rgb_obs]
+        image_features = jnp.concatenate(per_cam, axis=-1)
+
         lowdim_obs_cond = lowdim_obs_cond.reshape(B, H, -1)
         obs_cond = jnp.concatenate([image_features, lowdim_obs_cond], axis=-1)
         return obs_cond

@@ -8,3 +8,6 @@ logs/
 diffusers/
 sftp-config.json
 *.tar.gz
+
+*/libero
+.codex

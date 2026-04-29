@@ -47,7 +47,9 @@ class Workspace:
             return vae_module, raw_restored['vae_params']
 
     def run(self):
-        if "rm" in self.cfg.data.name:
+        if "libero" in self.cfg.data.name:
+            self.run_libero()
+        elif "rm" in self.cfg.data.name:
             self.run_rm()
         elif "aloha" in self.cfg.data.name:
             self.run_aloha()
@@ -184,6 +186,87 @@ class Workspace:
             
         print(f"min_z: {min_z}, max_z: {max_z}")
         print(f"done processing dataset! {dataset_path}")
+
+
+    def run_libero(self):
+        """Encode all demos in self.data (LIBERO multi-file glob) into a single
+        latent.hdf5. Demo group keys are globally unique (file_stem__demo_N) so
+        we never collide across the per-task hdf5s.
+        """
+        dataset_path = self.work_dir / 'latent.hdf5'
+        data_writer = h5py.File(dataset_path, "w")
+        data_grp = data_writer.create_group("data")
+
+        vae_module, vae_params = self.load_vae()
+        vae_params = jax.tree_util.tree_map(lambda x: jax.device_put(x, jax.devices('gpu')[0]), vae_params)
+
+        @jax.jit
+        def resize_original(obs):
+            obs_resize = jax.image.resize(image=obs, shape=(3, 256, 256), method="bilinear")
+            return obs_resize
+
+        @jax.jit
+        def encode(obs):
+            z = vae_module.apply({"params": vae_params}, obs, method=vae_module.encode)['latent_dist'].mean
+            return z
+        resize = jax.vmap(resize_original)
+
+        data = self.data.train_dataset
+        rgb_keys = list(data.rgb_keys)
+        # per-key min/max plus a global pair (matching the rm/aloha attrs)
+        min_z_per_key = {k: float('inf') for k in rgb_keys}
+        max_z_per_key = {k: float('-inf') for k in rgb_keys}
+        global_min, global_max = float('inf'), float('-inf')
+
+        n_demos = data.n_demos
+        for demo_id, obs_traj in tqdm(data.iter_demo_obs(rgb_keys), total=n_demos):
+            ep_data_grp = data_grp.create_group(demo_id)
+            for rgb_key, obs_arr in obs_traj.items():
+                obs_arr = jnp.asarray(obs_arr).astype(jnp.float32)
+                obs_arr = jax.device_put(obs_arr, jax.devices('gpu')[0])
+                obs_arr = obs_arr / 255.0
+                obs_arr = (obs_arr - 0.5) / 0.5
+                obs_arr = obs_arr.transpose(0, 3, 1, 2)
+                if self.cfg.pretrain_path is not None:
+                    obs_arr = resize(obs_arr)
+
+                zs = []
+                for i in range(0, len(obs_arr), self.cfg.shard):
+                    sharded = obs_arr[i:min(i + self.cfg.shard, len(obs_arr))]
+                    if sharded.shape[0] == self.cfg.shard:
+                        z = encode(sharded)
+                    else:
+                        n_extra = self.cfg.shard - sharded.shape[0]
+                        if self.cfg.pretrain_path is not None:
+                            pad = jnp.zeros((n_extra, 3, 256, 256))
+                        else:
+                            pad = jnp.zeros((n_extra, 3, sharded.shape[-1], sharded.shape[-1]))
+                        sharded_pad = jnp.concatenate([sharded, pad], axis=0)
+                        z = encode(sharded_pad)
+                        z = z[:sharded.shape[0]]
+                    zs.append(z)
+                zs = jnp.concatenate(zs, axis=0)
+                lo = float(jnp.min(zs))
+                hi = float(jnp.max(zs))
+                min_z_per_key[rgb_key] = min(min_z_per_key[rgb_key], lo)
+                max_z_per_key[rgb_key] = max(max_z_per_key[rgb_key], hi)
+                global_min = min(global_min, lo)
+                global_max = max(global_max, hi)
+                # store as float32 to match rm/aloha precedent
+                ep_data_grp.create_dataset(f"latent/{rgb_key}", data=np.array(zs, dtype=np.float32))
+
+        data_grp.attrs['total'] = n_demos
+        data_grp.attrs['min_z'] = global_min
+        data_grp.attrs['max_z'] = global_max
+        for k in rgb_keys:
+            data_grp.attrs[f'min_z_{k}'] = min_z_per_key[k]
+            data_grp.attrs[f'max_z_{k}'] = max_z_per_key[k]
+
+        print(f"[run_libero] encoded {n_demos} demos -> {dataset_path}")
+        print(f"  global min/max: {global_min:.4f} / {global_max:.4f}")
+        for k in rgb_keys:
+            print(f"  {k}: min={min_z_per_key[k]:.4f}  max={max_z_per_key[k]:.4f}")
+        data_writer.close()
 
 
 @hydra.main(config_path='.', config_name='process_sdvae_data')

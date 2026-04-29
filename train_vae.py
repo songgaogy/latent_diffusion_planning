@@ -1,6 +1,7 @@
 import hydra
 import numpy as np
 import os
+from collections import deque
 from pathlib import Path
 import psutil
 import time
@@ -8,7 +9,6 @@ import wandb
 
 import jax
 import jax.numpy as jnp
-import jaxlib
 import flax
 from flax.training import train_state, orbax_utils
 from functools import partial
@@ -48,6 +48,47 @@ class Workspace:
         self.step = 0
         self.timer = py_utils.Timer()
 
+    def make_data_iter(self, dataloader, shard_fn):
+        data_iter = map(shard_fn, map(lambda batch: jax.tree.map(lambda tensor: tensor.numpy(), batch), dataloader))
+        prefetch_size = int(getattr(self.cfg, "device_prefetch_size", 0))
+        if prefetch_size <= 0:
+            return data_iter
+        return self.prefetch_to_device(data_iter, prefetch_size)
+
+    @staticmethod
+    def prefetch_to_device(iterator, size):
+        queue = deque()
+        for _ in range(size):
+            queue.append(next(iterator))
+        while queue:
+            batch = queue.popleft()
+            try:
+                queue.append(next(iterator))
+            except StopIteration:
+                pass
+            yield batch
+
+    @staticmethod
+    def subsample_traj(batch, max_frames):
+        if max_frames is None or max_frames <= 0:
+            return batch
+        n_frames = batch["actions"].shape[0]
+        if n_frames <= max_frames:
+            return batch
+        inds = np.linspace(0, n_frames - 1, max_frames).round().astype(np.int64)
+        return dict(
+            actions=batch["actions"][inds],
+            obs={k: v[inds] for k, v in batch["obs"].items()},
+        )
+
+    @staticmethod
+    def metric_to_item(x):
+        if isinstance(x, (jax.Array, np.ndarray)):
+            arr = np.asarray(x)
+            if arr.shape == ():
+                return arr.item()
+        return x
+
     def init_model(self, rng, init_batch):
         rng, init_rng = jax.random.split(rng)
 
@@ -56,8 +97,9 @@ class Workspace:
         OmegaConf.resolve(self.cfg.model)
         with open_dict(self.cfg.model):
             self.cfg.model.pop('_target_')
-        model = model_class.create(model_rng, init_batch, self.data.shape_meta, 
-                            **self.cfg.model)
+
+        # stable vae model
+        model = model_class.create(model_rng, init_batch, self.data.shape_meta, **self.cfg.model)
 
         if self.cfg.restore_snapshot_path is not None:
             print(f"loading checkpoint from {self.cfg.restore_snapshot_path}")
@@ -81,11 +123,13 @@ class Workspace:
         n_devices = len(devices)
         print(f"using {n_devices} devices: {devices}")
         assert self.data.batch_size % n_devices == 0
+
+        # DDP training
         sharding = jax.sharding.PositionalSharding(devices)
         shard_fn = partial(py_utils.shard_batch, sharding=sharding)
 
         # init model and dataset
-        train_data_iter = map(shard_fn, map(lambda batch: jax.tree.map(lambda tensor: tensor.numpy(), batch), self.train_dataloader))
+        train_data_iter = self.make_data_iter(self.train_dataloader, shard_fn)
         init_batch = next(train_data_iter)
         rng = jax.random.PRNGKey(self.seed)
         self.timer.tick("time/init_model")
@@ -110,7 +154,7 @@ class Workspace:
             try:
                 batch = next(train_data_iter)
             except StopIteration:
-                train_data_iter = map(postprocess_fn, map(shard_fn, map(lambda batch: jax.tree.map(lambda tensor: tensor.numpy(), batch), self.train_dataloader)))
+                train_data_iter = self.make_data_iter(self.train_dataloader, shard_fn)
                 batch = next(train_data_iter)
             self.timer.tock("time/data")
 
@@ -121,7 +165,7 @@ class Workspace:
             self.step += 1
 
             if log_every_step(self.step):
-                metrics = jax.tree.map(lambda x: x.item() if isinstance(x, (jnp.ndarray, jaxlib.xla_extension.ArrayImpl)) else x, metrics)
+                metrics = jax.tree.map(self.metric_to_item, metrics)
                 metrics.update(self.timer.get_average_times())
                 metrics['total_time'] = time.time() - start_time
                 self.logger.log_metrics(metrics, self.step, ty='train')
@@ -142,7 +186,7 @@ class Workspace:
 
         sharding = jax.sharding.PositionalSharding(jax.local_devices())
         shard_fn = partial(py_utils.shard_batch, sharding=sharding)
-        eval_data_iter = map(shard_fn, map(lambda batch: jax.tree.map(lambda tensor: tensor.numpy(), batch), self.eval_dataloader))
+        eval_data_iter = self.make_data_iter(self.eval_dataloader, shard_fn)
         all_metrics = []
         for idx, batch in enumerate(eval_data_iter):
             metrics_rng, eval_rng = jax.random.split(eval_rng)
@@ -155,7 +199,7 @@ class Workspace:
         # take average of metrics
         eval_metrics = {f"evaldata/{k}": np.mean([m[k] for m in all_metrics]) for k in all_metrics[0]}
         
-        train_data_iter = map(shard_fn, map(lambda batch: jax.tree.map(lambda tensor: tensor.numpy(), batch), self.train_dataloader))
+        train_data_iter = self.make_data_iter(self.train_dataloader, shard_fn)
         init_batch = next(train_data_iter)
         eval_batch = batch
         
@@ -172,9 +216,10 @@ class Workspace:
 
         image_dir = Path(webpage.get_image_dir())
         train_comb_paths = []
+        eval_traj_frames = getattr(self.cfg, "eval_traj_frames", None)
         for i in range(3):
             for rgb_obs in self.cfg.data.meta.rgb_obs:
-                train_traj = self.train_dataloader.dataset.sample_traj(i)
+                train_traj = self.subsample_traj(self.train_dataloader.dataset.sample_traj(i), eval_traj_frames)
                 train_rng, t_t_rng = jax.random.split(eval_rng)
                 train_traj_reconstruct = model.reconstruct(train_traj, t_t_rng, rgb_obs)
                 train_traj_reconstruct = np.clip((np.array(train_traj_reconstruct) + 1) / 2 * 255, 0, 255).transpose(0, 2, 3, 1).astype(np.uint8)
@@ -188,7 +233,7 @@ class Workspace:
         eval_comb_paths = []
         for i in range(3):
             for rgb_obs in self.cfg.data.meta.rgb_obs:
-                eval_traj = self.eval_dataloader.dataset.sample_traj(i)
+                eval_traj = self.subsample_traj(self.eval_dataloader.dataset.sample_traj(i), eval_traj_frames)
                 eval_rng, e_t_rng = jax.random.split(eval_rng)
                 eval_traj_reconstruct = model.reconstruct(eval_traj, e_t_rng, rgb_obs)
                 eval_traj_reconstruct = np.clip((np.array(eval_traj_reconstruct) + 1) / 2 * 255, 0, 255).transpose(0, 2, 3, 1).astype(np.uint8)
@@ -249,7 +294,7 @@ def main(cfg):
     # create logger
     if cfg.use_wandb:
         import omegaconf
-        wandb.init(entity=YOUR_ENTITY, project='ldp', group=cfg.experiment_folder,
+        wandb.init(entity='songgao-personal', project='ldp', group=cfg.experiment_folder,
                     name=cfg.experiment_name,tags=[cfg.experiment_folder], sync_tensorboard=True)
         wandb.config = omegaconf.OmegaConf.to_container(
             cfg, resolve=True, throw_on_missing=False

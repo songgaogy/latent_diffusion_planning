@@ -1,0 +1,49 @@
+_target_: data.libero_data.LiberoData
+name: libero_all_img256_data
+
+# infra
+batch_size: ${batch_size}
+n_workers: ${n_workers}
+obs_horizon: ${obs_horizon}
+prefetch_factor: 4
+seq_length: ${horizon}
+hdf5_use_swmr: true
+pin_memory: true
+cache_max_gb_per_worker: 8
+eval_cache_max_gb_per_worker: 0
+sample_burst_length: 32
+
+# data paths — VAE training over all 5 suites (~130 files, ~5500 demos)
+train_paths: data/libero/*/*demo.hdf5
+eval_paths: null
+train_n_episode_overfit: null
+eval_n_episode_overfit: null
+# Cap demos per task during eval; left null for full coverage
+train_per_file_n_overfit: null
+eval_per_file_n_overfit: 1
+
+meta:
+  # VAE only consumes rgb; skip lowdim io entirely
+  lowdim_obs: []
+  rgb_obs: [agentview_rgb, eye_in_hand_rgb]
+  rgb_viz: agentview_rgb
+  shape_meta:
+    ac_dim: 7
+    all_shapes:
+      ee_states: [6]
+      gripper_states: [2]
+      joint_states: [7]
+      agentview_rgb: [256, 256, 3]
+      eye_in_hand_rgb: [256, 256, 3]
+      optimal: [1]
+    use_images: True
+  obs_normalization:
+    obs:
+      agentview_rgb: {min: 0, max: 255}
+      eye_in_hand_rgb: {min: 0, max: 255}
+      optimal: {min: 0, max: 1}
+    actions:
+      clip_min: -1
+      clip_max: 1
+
+env_params: {}

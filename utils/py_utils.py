@@ -31,7 +31,7 @@ def shard_batch(batch, sharding):
         batch: A pytree of arrays.
         sharding: A jax Sharding object with shape (n_devices,).
     """
-    return jax.tree_map(
+    return jax.tree.map(
         lambda x: jax.device_put(
             x, sharding.reshape(sharding.shape[0], *((1,) * (x.ndim - 1)))
         ),

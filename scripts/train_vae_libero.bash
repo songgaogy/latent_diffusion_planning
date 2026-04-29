@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Train the SD-VAE on all 5 LIBERO suites (~5500 demos) at native 256x256.
+#
+# Override examples:
+#   bash scripts/train_vae_libero.bash experiment_name=run01 batch_size=8
+#   CUDA_VISIBLE_DEVICES=0 bash scripts/train_vae_libero.bash batch_size=8 n_workers=2
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+export WANDB_MODE=${WANDB_MODE:-offline}
+export WANDB_NAME=${WANDB_NAME:-songgao-personal}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
+export HYDRA_FULL_ERROR=1
+
+PY=${PY:-/home/dodo/miniconda3/envs/ldp/bin/python}
+
+set -x
+"$PY" train_vae.py \
+    --config-name train_vae_libero \
+    "$@"

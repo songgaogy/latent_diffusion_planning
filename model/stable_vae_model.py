@@ -15,6 +15,20 @@ import utils.flax_utils as flax_utils
 from utils.flax_utils import nonpytree_field
 from utils.data_utils import postprocess_batch
 
+def _patch_flax_trace_level_for_jax_06():
+    import flax.core.tracers as flax_tracers
+
+    def trace_level(main):
+        if main:
+            return getattr(main, "level", getattr(getattr(main, "main", None), "level", float("-inf")))
+        return float("-inf")
+
+    if not hasattr(jax.core.find_top_trace(()), "level"):
+        flax_tracers.trace_level = trace_level
+
+
+_patch_flax_trace_level_for_jax_06()
+
 class StableVAEModel(flax.struct.PyTreeNode):
     vae_state: train_state.TrainState
     obs_normalization: dict[str, Any]

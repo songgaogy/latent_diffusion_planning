@@ -183,6 +183,13 @@ class Workspace:
             env_metrics, videos = aloha_env_utils.run_aloha_eval(env_params, agent, agent.config['name'], self.cfg.n_eval_episodes, self.cfg.n_eval_processes, self.cfg.seed, eval_rng)
             self.save_videos(videos)
             metrics.update(env_metrics)
+        elif "libero" in self.data.name:
+            import utils.libero_env_utils as libero_env_utils
+            self.timer.tock("time/eval")
+            env_params = self.data.env_params
+            env_metrics, videos = libero_env_utils.run_libero_eval(env_params, agent, agent.config['name'], self.cfg.n_eval_episodes, self.cfg.n_eval_processes, self.cfg.seed, eval_rng)
+            self.save_videos(videos)
+            metrics.update(env_metrics)
         else:
             raise NotImplementedError
 

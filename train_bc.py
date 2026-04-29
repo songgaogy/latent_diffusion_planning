@@ -178,12 +178,23 @@ class Workspace:
                 self.save_videos(videos)
                 eval_metrics.update(env_metrics)
         elif "aloha" in self.data.name:
-            import utils.aloha_env_utils as aloha_env_utils 
+            import utils.aloha_env_utils as aloha_env_utils
             env_params = self.data.env_params
             if ('use_planner' in self.cfg.agent) and (not self.cfg.agent.use_planner):
                 pass
             else:
                 env_metrics, videos = aloha_env_utils.run_aloha_eval(env_params, agent, agent.config['name'], self.cfg.n_eval_episodes, self.cfg.n_eval_processes, self.cfg.seed, eval_rng)
+                eval_metrics.update(env_metrics)
+                self.save_videos(videos)
+        elif "libero" in self.data.name:
+            import utils.libero_env_utils as libero_env_utils
+            env_params = self.data.env_params
+            # libero datasets carry no env_meta (no env_args attr in hdf5);
+            # env_params from the data yaml is used as-is.
+            if ('use_planner' in self.cfg.agent) and (not self.cfg.agent.use_planner):
+                pass
+            else:
+                env_metrics, videos = libero_env_utils.run_libero_eval(env_params, agent, agent.config['name'], self.cfg.n_eval_episodes, self.cfg.n_eval_processes, self.cfg.seed, eval_rng)
                 eval_metrics.update(env_metrics)
                 self.save_videos(videos)
         else:

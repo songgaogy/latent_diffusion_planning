@@ -15,8 +15,9 @@ from pathlib import Path
 import yaml
 
 from diffusers import FlaxAutoencoderKL
-from diffusers.schedulers.scheduling_ddpm_flax import FlaxDDPMScheduler
+from diffusers.schedulers.scheduling_ddpm_flax import FlaxDDPMScheduler, FlaxDDPMSchedulerOutput
 from flax.core import FrozenDict
+from flax.training import orbax_utils
 from networks.mlp_diffusion_nets import MLPDiffusion
 from optax._src import linear_algebra
 import utils.flax_utils as flax_utils
@@ -24,6 +25,77 @@ from utils.flax_utils import nonpytree_field
 from utils.data_utils import postprocess_batch, postprocess_batch_obs, normalize_obs, unnormalize_obs
 
 import numpy as np
+
+def _patch_flax_trace_level_for_jax_06():
+    import flax.core.tracers as flax_tracers
+
+    def trace_level(main):
+        if main:
+            return getattr(
+                main,
+                "level",
+                getattr(getattr(main, "main", None), "level", float("-inf")),
+            )
+        return float("-inf")
+
+    if not hasattr(jax.core.find_top_trace(()), "level"):
+        flax_tracers.trace_level = trace_level
+
+_patch_flax_trace_level_for_jax_06()
+
+def _patch_diffusers_ddpm_step_for_jax_06():
+    if getattr(FlaxDDPMScheduler.step, "_ldp_jax06_patch", False):
+        return
+
+    def step(self, state, model_output, timestep, sample, key=None, return_dict=True):
+        t = timestep
+        if key is None:
+            key = jax.random.PRNGKey(0)
+
+        if model_output.shape[1] == sample.shape[1] * 2 and self.config.variance_type in ["learned", "learned_range"]:
+            model_output, predicted_variance = jnp.split(model_output, sample.shape[1], axis=1)
+        else:
+            predicted_variance = None
+
+        alpha_prod_t = state.common.alphas_cumprod[t]
+        alpha_prod_t_prev = jnp.where(t > 0, state.common.alphas_cumprod[t - 1], jnp.array(1.0, dtype=self.dtype))
+        beta_prod_t = 1 - alpha_prod_t
+        beta_prod_t_prev = 1 - alpha_prod_t_prev
+
+        if self.config.prediction_type == "epsilon":
+            pred_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
+        elif self.config.prediction_type == "sample":
+            pred_original_sample = model_output
+        elif self.config.prediction_type == "v_prediction":
+            pred_original_sample = alpha_prod_t ** 0.5 * sample - beta_prod_t ** 0.5 * model_output
+        else:
+            raise ValueError(
+                f"prediction_type {self.config.prediction_type} must be epsilon, sample, or v_prediction"
+            )
+
+        if self.config.clip_sample:
+            pred_original_sample = jnp.clip(pred_original_sample, -1, 1)
+
+        pred_original_sample_coeff = (alpha_prod_t_prev ** 0.5 * state.common.betas[t]) / beta_prod_t
+        current_sample_coeff = state.common.alphas[t] ** 0.5 * beta_prod_t_prev / beta_prod_t
+        pred_prev_sample = pred_original_sample_coeff * pred_original_sample + current_sample_coeff * sample
+
+        def random_variance():
+            split_key = jax.random.split(key, num=1)[0]
+            noise = jax.random.normal(split_key, shape=model_output.shape, dtype=self.dtype)
+            return self._get_variance(state, t, predicted_variance=predicted_variance) ** 0.5 * noise
+
+        variance = jnp.where(t > 0, random_variance(), jnp.zeros(model_output.shape, dtype=self.dtype))
+        pred_prev_sample = pred_prev_sample + variance
+
+        if not return_dict:
+            return (pred_prev_sample, state)
+        return FlaxDDPMSchedulerOutput(prev_sample=pred_prev_sample, state=state)
+
+    step._ldp_jax06_patch = True
+    FlaxDDPMScheduler.step = step
+
+_patch_diffusers_ddpm_step_for_jax_06()
 
 class LDPAgent(flax.struct.PyTreeNode):
     planner_state : flax_utils.TrainStateEMA
@@ -54,6 +126,9 @@ class LDPAgent(flax.struct.PyTreeNode):
 
             B, H = init_obs.shape[:2]
             init_obs = init_obs.reshape(-1, *init_obs.shape[-3:])
+            if key not in self.obs_normalization["obs"]:
+                init_obs = init_obs / 255.0
+                init_obs = (init_obs - 0.5) / 0.5
             # init_obs transpose from BHWC to BCHW
             init_obs_resize = jnp.transpose(init_obs, (0, 3, 1, 2))
             z = self.vae_module.apply({"params": self.vae_params}, init_obs_resize, method=self.vae_module.encode)['latent_dist'].mean
@@ -125,7 +200,19 @@ class LDPAgent(flax.struct.PyTreeNode):
         obs_cond = jnp.concatenate([image_features, lowdim_obs_cond], axis=-1)
         return obs_cond
 
-    def plan_loss(self, params, rng, obs_emb, obs_horizon):
+    @staticmethod
+    def _get_goal_cond(goal_obs, goal_rgb_obs):
+        if goal_obs is None or len(goal_rgb_obs) == 0:
+            return None
+        per_cam = [goal_obs[key].reshape(goal_obs[key].shape[0], -1) for key in goal_rgb_obs]
+        return jnp.concatenate(per_cam, axis=-1)
+
+    def get_goal_cond(self, batch):
+        if not self.config['use_goal_cond'] or 'goal_obs' not in batch:
+            return None
+        return self._get_goal_cond(batch['goal_obs'], self.config['goal_rgb_obs'])
+
+    def plan_loss(self, params, rng, obs_emb, obs_horizon, goal_img_cond=None):
         # noising
         rng, t_rng, noise_rng = jax.random.split(rng, 3)
         t = jax.random.randint(t_rng, (obs_emb.shape[0],), 0, self.config['planner_n_diffusion_steps'])
@@ -135,7 +222,7 @@ class LDPAgent(flax.struct.PyTreeNode):
 
         obs_cond = obs_emb[:, :obs_horizon, ...] # tbh I'm not sure this is correct
         obs_cond = obs_cond.reshape(obs_emb.shape[0], -1)
-        pred_noise = self.planner_state.apply_fn({"params": params}, noisy_next_obs_emb, t, obs_cond)
+        pred_noise = self.planner_state.apply_fn({"params": params}, noisy_next_obs_emb, t, obs_cond, goal_img_cond=goal_img_cond)
         loss = jnp.mean((pred_noise - noise) ** 2)
         metrics = dict()
         return loss, metrics
@@ -155,11 +242,12 @@ class LDPAgent(flax.struct.PyTreeNode):
 
     def loss(self, params, batch, rng, use_planner, use_idm, obs_horizon):
         obs_emb = self.get_obs_cond(batch['obs'])
+        goal_img_cond = self.get_goal_cond(batch)
         action = batch['actions']
 
         if use_planner:
             rng, plan_rng = jax.random.split(rng)
-            plan_loss, plan_metrics = self.plan_loss(params['planner'], plan_rng, obs_emb, obs_horizon)
+            plan_loss, plan_metrics = self.plan_loss(params['planner'], plan_rng, obs_emb, obs_horizon, goal_img_cond)
             plan_loss = self.alpha_planner * plan_loss
         else:
             plan_loss = 0
@@ -181,6 +269,10 @@ class LDPAgent(flax.struct.PyTreeNode):
         metrics['emb_max'] = jnp.max(obs_emb)
         metrics['emb_mean'] = jnp.mean(obs_emb)
         metrics['emb_std'] = jnp.std(obs_emb)
+        if goal_img_cond is not None:
+            metrics['goal_cond_min'] = jnp.min(goal_img_cond)
+            metrics['goal_cond_max'] = jnp.max(goal_img_cond)
+            metrics['goal_cond_std'] = jnp.std(goal_img_cond)
 
         metrics['action_min'] = jnp.min(action)
         metrics['action_max'] = jnp.max(action)
@@ -198,13 +290,14 @@ class LDPAgent(flax.struct.PyTreeNode):
 
     def loss_mixed(self, params, batch, mixed_batch, rng, use_planner, use_idm, obs_horizon):
         obs_emb = self.get_obs_cond(batch['obs'])
+        goal_img_cond = self.get_goal_cond(batch)
         action = batch['actions']
         mixed_obs_emb = self.get_obs_cond(mixed_batch['obs'])
         mixed_action = mixed_batch['actions']
 
         if use_planner:
             rng, plan_rng = jax.random.split(rng)
-            plan_loss, plan_metrics = self.plan_loss(params['planner'], plan_rng, obs_emb, obs_horizon)
+            plan_loss, plan_metrics = self.plan_loss(params['planner'], plan_rng, obs_emb, obs_horizon, goal_img_cond)
             plan_loss = self.alpha_planner * plan_loss
         else:
             plan_loss = 0
@@ -226,6 +319,10 @@ class LDPAgent(flax.struct.PyTreeNode):
         metrics['emb_max'] = jnp.max(obs_emb)
         metrics['emb_mean'] = jnp.mean(obs_emb)
         metrics['emb_std'] = jnp.std(obs_emb)
+        if goal_img_cond is not None:
+            metrics['goal_cond_min'] = jnp.min(goal_img_cond)
+            metrics['goal_cond_max'] = jnp.max(goal_img_cond)
+            metrics['goal_cond_std'] = jnp.std(goal_img_cond)
 
         metrics['action_min'] = jnp.min(action)
         metrics['action_max'] = jnp.max(action)
@@ -448,11 +545,28 @@ class LDPAgent(flax.struct.PyTreeNode):
         return self.sample_viz(batch, eval_rng)
 
     def sample_viz(self, batch, eval_rng):
+        eval_rng = jnp.asarray(np.asarray(jax.device_get(eval_rng)).reshape(-1, 2)[0], dtype=jnp.uint32)
         if 'actions' in batch.keys():
             batch = jax.jit(postprocess_batch)(batch, self.obs_normalization)
         else:
-            assert len(batch.keys()) == 1
-            batch = jax.jit(postprocess_batch_obs)(batch, self.obs_normalization)
+            assert "obs" in batch.keys()
+            goal_obs = batch.get("goal_obs", None)
+            obs = batch["obs"]
+            raw_rgb_obs = [k for k in obs if f"latent_{k}" in self.config["rgb_obs"]]
+            if raw_rgb_obs:
+                norm_obs = {
+                    k: v for k, v in obs.items()
+                    if k in self.obs_normalization["obs"]
+                }
+                if norm_obs:
+                    norm_obs = normalize_obs(norm_obs, self.obs_normalization["obs"])
+                for k in raw_rgb_obs:
+                    norm_obs[k] = obs[k]
+                batch = {"obs": norm_obs}
+            else:
+                batch = jax.jit(postprocess_batch_obs)(batch, self.obs_normalization)
+            if goal_obs is not None:
+                batch["goal_obs"] = normalize_obs(goal_obs, self.obs_normalization["obs"])
 
         batch['obs'] = self.vae_encode(batch['obs'])
         action, metrics = self.sample_viz_step(batch, eval_rng, self.config['obs_horizon'])
@@ -472,6 +586,7 @@ class LDPAgent(flax.struct.PyTreeNode):
             break
 
         obs_emb = self.get_obs_cond(batch['obs'])
+        goal_img_cond = self.get_goal_cond(batch)
         obs_cond = obs_emb[:, :obs_horizon, ...].reshape(obs_emb.shape[0], -1)
         eval_rng, noise_rng = jax.random.split(eval_rng)
         noisy_next_obs = jax.random.normal(noise_rng, (B, self.config['pred_horizon'], self.config['obs_dim']), dtype=jnp.float32)
@@ -482,7 +597,7 @@ class LDPAgent(flax.struct.PyTreeNode):
             s_rng, eval_rng = jax.random.split(eval_rng)
             k = n_diffusion_steps - 1 - i
 
-            noise_pred = self.planner_state.apply_fn({"params": self.planner_state.params}, noisy_next_obs, k, obs_cond)
+            noise_pred = self.planner_state.apply_fn({"params": self.planner_state.params}, noisy_next_obs, k, obs_cond, goal_img_cond=goal_img_cond)
             noisy_next_obs = self.planner_noise_scheduler.step(self.planner_noise_state, noise_pred, k, noisy_next_obs, s_rng).prev_sample
 
             return noisy_next_obs, eval_rng
@@ -535,7 +650,7 @@ class LDPAgent(flax.struct.PyTreeNode):
         name, planner, idm_net, preprocess_time, cond_encoder, 
         vae_pretrain_path, vae_feature_dim,
         use_planner, use_idm,
-        lowdim_obs, rgb_obs, obs_normalization, data_name,
+        lowdim_obs, rgb_obs, goal_rgb_obs, use_goal_cond, obs_normalization, data_name,
         obs_horizon, pred_horizon, action_horizon, 
         planner_n_diffusion_steps, idm_n_diffusion_steps,
         alpha_planner, alpha_idm,
@@ -551,18 +666,34 @@ class LDPAgent(flax.struct.PyTreeNode):
             lowdim_obs_dim += int(np.prod(shape_meta['all_shapes'][key]))
         resnet_feature_dim = vae_feature_dim
         vision_feature_dim = resnet_feature_dim * len(rgb_obs) # ResNet18 has output dim of 512
+        goal_rgb_obs = list(goal_rgb_obs)
+        goal_dim = 0
+        if use_goal_cond:
+            for key in goal_rgb_obs:
+                goal_dim += int(np.prod(shape_meta['all_shapes'][key]))
         obs_dim = lowdim_obs_dim + vision_feature_dim
         action_dim = shape_meta['ac_dim']
 
         # load_vae
         if "ckpt" in vae_pretrain_path:
-            # create encoder
-            ckpter = orbax.checkpoint.PyTreeCheckpointer()
-            raw_restored = ckpter.restore(vae_pretrain_path)
             model_cfg_path = Path(vae_pretrain_path) / '../../.hydra/config.yaml'
             with open(model_cfg_path, 'r') as f:
                 model_cfg_path = OmegaConf.create(yaml.safe_load(f))
             vae_module = hydra.utils.instantiate(model_cfg_path.model.vae)
+            target_params = vae_module.init(
+                rng,
+                jnp.zeros((2, 3, 64, 64)),
+            )['params']
+            target = {'vae_params': target_params}
+            restore_args = orbax_utils.restore_args_from_target(target)
+            ckpter = orbax.checkpoint.PyTreeCheckpointer()
+            raw_restored = ckpter.restore(
+                vae_pretrain_path,
+                item=target,
+                restore_args=restore_args,
+                transforms={},
+                transforms_default_to_original=True,
+            )
             vae_params = raw_restored['vae_params']
         else:
             vae_module, vae_params = FlaxAutoencoderKL.from_pretrained(vae_pretrain_path)
@@ -576,18 +707,23 @@ class LDPAgent(flax.struct.PyTreeNode):
 
         # create encoder
         obs_emb = LDPAgent._get_obs_cond(batch['obs'], rgb_obs, lowdim_obs, obs_horizon, init_enc_rng)
+        goal_img_cond = None
+        if use_goal_cond:
+            if "goal_obs" not in batch:
+                raise ValueError("use_goal_cond=True requires batch['goal_obs']")
+            goal_img_cond = LDPAgent._get_goal_cond(batch['goal_obs'], goal_rgb_obs)
 
         # create planner
         if use_planner:
             rng, init_rng = jax.random.split(rng)
             with open_dict(planner):
                 planner.input_dim = obs_dim # important! model obs not action
-                planner.global_cond_dim = obs_dim
+                planner.global_cond_dim = obs_dim + goal_dim
                 planner._convert_ = 'all'
             planner = hydra.utils.instantiate(planner)
             obs_cond = obs_emb[:, :obs_horizon, ...]
             obs_cond = obs_cond.reshape(obs_emb.shape[0], -1)
-            planner_params = planner.init(init_rng, obs_emb[:, obs_horizon:], init_time, obs_cond)["params"]
+            planner_params = planner.init(init_rng, obs_emb[:, obs_horizon:], init_time, obs_cond, goal_img_cond=goal_img_cond)["params"]
             param_count = sum(x.size for x in jax.tree_util.tree_leaves(planner_params))
             print(f"planner number of parameters: {param_count:e}")
 
@@ -671,7 +807,8 @@ class LDPAgent(flax.struct.PyTreeNode):
                     lowdim_obs=lowdim_obs, rgb_obs=rgb_obs, obs_horizon=obs_horizon,
                     name=name, action_dim=shape_meta['ac_dim'],
                     pred_horizon=pred_horizon, action_horizon=action_horizon,
-                    obs_dim=obs_dim, 
+                    obs_dim=obs_dim, goal_dim=goal_dim,
+                    use_goal_cond=use_goal_cond, goal_rgb_obs=goal_rgb_obs,
                     update_planner_every=update_planner_every, update_idm_every=update_idm_every, 
                     update_planner_until=update_planner_until,
                     update_planner_after=update_planner_after, 

@@ -23,6 +23,7 @@ cd "$(dirname "$0")/.."
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_NAME=${WANDB_NAME:-songgao-personal}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+export HYDRA_FULL_ERROR=1
 
 source scripts/env_helpers.bash
 PY="$(resolve_ldp_python)"

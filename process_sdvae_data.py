@@ -12,6 +12,7 @@ import yaml
 import jax
 import jax.numpy as jnp
 import flax
+from flax.training import orbax_utils
 import orbax 
 import orbax.checkpoint as ckpt 
 import matplotlib.pyplot as plt
@@ -19,6 +20,23 @@ from omegaconf import OmegaConf, open_dict
 
 from diffusers import FlaxAutoencoderKL
 from functools import partial
+
+def _patch_flax_trace_level_for_jax_06():
+    import flax.core.tracers as flax_tracers
+
+    def trace_level(main):
+        if main:
+            return getattr(
+                main,
+                "level",
+                getattr(getattr(main, "main", None), "level", float("-inf")),
+            )
+        return float("-inf")
+
+    if not hasattr(jax.core.find_top_trace(()), "level"):
+        flax_tracers.trace_level = trace_level
+
+_patch_flax_trace_level_for_jax_06()
 
 class Workspace:
     def __init__(self, cfg):
@@ -37,13 +55,24 @@ class Workspace:
             vae_module, vae_params = FlaxAutoencoderKL.from_pretrained(self.cfg.pretrain_path)
             return vae_module, vae_params
         if self.cfg.restore_snapshot_path is not None:
-            # create encoder
-            ckpter = orbax.checkpoint.PyTreeCheckpointer()
-            raw_restored = ckpter.restore(self.cfg.restore_snapshot_path)
             model_cfg_path = Path(self.cfg.restore_snapshot_path) / '../../.hydra/config.yaml'
             with open(model_cfg_path, 'r') as f:
                 model_cfg_path = OmegaConf.create(yaml.safe_load(f))
             vae_module = hydra.utils.instantiate(model_cfg_path.model.vae)
+            target_params = vae_module.init(
+                jax.random.PRNGKey(self.seed),
+                jnp.zeros((2, 3, 64, 64)),
+            )['params']
+            target = {'vae_params': target_params}
+            restore_args = orbax_utils.restore_args_from_target(target)
+            ckpter = orbax.checkpoint.PyTreeCheckpointer()
+            raw_restored = ckpter.restore(
+                self.cfg.restore_snapshot_path,
+                item=target,
+                restore_args=restore_args,
+                transforms={},
+                transforms_default_to_original=True,
+            )
             return vae_module, raw_restored['vae_params']
 
     def run(self):

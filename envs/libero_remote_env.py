@@ -101,6 +101,7 @@ class LiberoRemoteEnv:
             _LIBERO_REPO_CANDIDATES, "LIBERO repo"
         )
         log_dir = Path(log_dir or os.environ.get("LIBERO_LOG_DIR", "/tmp/libero_remote_env_logs"))
+        log_dir.mkdir(parents=True, exist_ok=True)
         wid = worker_id if worker_id is not None else os.getpid()
         self._log_path = log_dir / f"worker_{wid}_task{task_id}.log"
 
@@ -112,6 +113,7 @@ class LiberoRemoteEnv:
         env["PYTHONPATH"] = os.pathsep.join([str(_REPO_ROOT), str(repo), env.get("PYTHONPATH", "")])
         env.setdefault("MUJOCO_GL", "egl")
         env.setdefault("PYOPENGL_PLATFORM", "egl")
+        env.setdefault("ROBOSUITE_LOG_PATH", str(log_dir / f"robosuite_worker_{wid}.log"))
 
         self._proc = subprocess.Popen(
             [py, "-u", str(_REPO_ROOT / "envs" / "libero_eval_server.py")],

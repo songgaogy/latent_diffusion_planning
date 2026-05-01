@@ -7,7 +7,6 @@ import wandb
 
 import jax
 import jax.numpy as jnp
-import jaxlib
 import flax
 from flax.training import train_state, orbax_utils
 from functools import partial
@@ -47,6 +46,24 @@ class Workspace:
         self.step = 0
         self.timer = py_utils.Timer()
 
+    @staticmethod
+    def metric_to_item(x):
+        if isinstance(x, (jax.Array, np.ndarray)):
+            arr = np.asarray(x)
+            if arr.shape == ():
+                return arr.item()
+        return x
+
+    @staticmethod
+    def to_single_device(tree, device=None):
+        device = device or jax.local_devices()[0]
+        return jax.device_put(jax.device_get(tree), device)
+
+    @staticmethod
+    def to_single_prng_key(key, device=None):
+        key = np.asarray(jax.device_get(key)).reshape(-1, 2)[0]
+        return jax.device_put(jnp.asarray(key, dtype=jnp.uint32), device or jax.local_devices()[0])
+
     def init_agent(self, rng, init_batch):
         rng, init_rng = jax.random.split(rng)
 
@@ -80,8 +97,7 @@ class Workspace:
         rng = jax.random.PRNGKey(self.seed)
         self.timer.tick("time/init_agent")
         agent, rng = self.init_agent(rng, init_batch)
-        print("no sharding available")
-        # agent = jax.device_put(jax.tree.map(jnp.array, agent), sharding.replicate())
+        agent = jax.device_put(jax.tree.map(jnp.asarray, agent), sharding.replicate())
         self.timer.tock("time/init_agent")
         print("finished initializing agent")
 
@@ -97,18 +113,23 @@ class Workspace:
 
         while True:
             self.timer.tick("time/update_loop")
+            self.timer.tick("time/data")
             try:
                 batch = next(train_data_iter)
             except StopIteration:
                 train_data_iter = map(shard_fn, map(lambda batch: jax.tree.map(lambda tensor: tensor.numpy(), batch), self.train_dataloader))
                 batch = next(train_data_iter)
+            self.timer.tock("time/data")
 
             update_rng, rng = jax.random.split(rng)
+            update_rng = jax.device_put(update_rng, sharding.replicate())
+            self.timer.tick("time/update")
             agent, metrics = agent.update(batch, update_rng, self.step)
+            self.timer.tock("time/update")
             self.step += 1
 
             if log_every_step(self.step):
-                metrics = jax.tree.map(lambda x: x.item() if isinstance(x, (jnp.ndarray, jaxlib.xla_extension.ArrayImpl)) else x, metrics)
+                metrics = jax.tree.map(self.metric_to_item, metrics)
                 metrics.update(self.timer.get_average_times())
                 metrics['total_time'] = time.time() - start_time
                 self.logger.log_metrics(metrics, self.step, ty='train')
@@ -139,21 +160,23 @@ class Workspace:
             eval_data_iter = map(shard_fn, map(lambda batch: jax.tree.map(lambda tensor: tensor.numpy(), batch), self.eval_dataloader))
             all_metrics = []
             for idx, batch in enumerate(eval_data_iter):
-                metrics_rng, eval_rng, sample_rng = jax.random.split(eval_rng, 3)
+                metrics_rng, eval_rng, sample_rng, plan_rng = jax.random.split(eval_rng, 4)
                 metrics = agent.get_metrics(batch, metrics_rng)
                 try:
-                    pred_action, _ = agent.sample_action(batch, sample_rng)
+                    pred_action_out = agent.sample_action(batch, sample_rng)
+                    pred_action = pred_action_out[0] if isinstance(pred_action_out, tuple) else pred_action_out
                     H = pred_action.shape[1]
                     metrics['action_mse'] = jnp.mean(jnp.square(batch['actions'][:, :H, :] - pred_action[:, :H, :]))
                     metrics['action_l1'] = jnp.mean(jnp.abs(batch['actions'][:, :H, :] - pred_action[:, :H, :]))
+                    metrics['teacher_forced_idm_action_mse'] = metrics['action_mse']
                     if self.cfg.agent.name.startswith("dp"):
                         pass
                     elif self.cfg.agent.use_planner:
-                        pred_action_full, _ = agent.sample(batch, sample_rng)
+                        pred_action_full, stats = agent.sample(batch, plan_rng)
                         H = pred_action_full.shape[1]
                         metrics['full_action_mse'] = jnp.mean(jnp.square(batch['actions'][:, :H, :] - pred_action_full))
-                        plan_mse = agent.sample_plan_stats(batch, sample_rng)
-                        metrics['plan_mse'] = plan_mse
+                        if 'plan_mse' in stats:
+                            metrics['plan_mse'] = stats['plan_mse']
                 except:
                     # too lazy to implement everywhere, and these stats aren't imperative
                     pass
@@ -194,7 +217,9 @@ class Workspace:
             if ('use_planner' in self.cfg.agent) and (not self.cfg.agent.use_planner):
                 pass
             else:
-                env_metrics, videos = libero_env_utils.run_libero_eval(env_params, agent, agent.config['name'], self.cfg.n_eval_episodes, self.cfg.n_eval_processes, self.cfg.seed, eval_rng)
+                eval_agent = self.to_single_device(agent)
+                eval_rng = self.to_single_prng_key(eval_rng)
+                env_metrics, videos = libero_env_utils.run_libero_eval(env_params, eval_agent, eval_agent.config['name'], self.cfg.n_eval_episodes, self.cfg.n_eval_processes, self.cfg.seed, eval_rng)
                 eval_metrics.update(env_metrics)
                 self.save_videos(videos)
         else:

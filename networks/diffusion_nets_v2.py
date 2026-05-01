@@ -111,7 +111,7 @@ class ConditionalUnet1D(nn.Module):
     downsample: bool = True
 
     @nn.compact
-    def __call__(self, sample, timestep, global_cond=None, training=True):
+    def __call__(self, sample, timestep, global_cond=None, training=True, goal_img_cond=None):
         # samples is # (B, T, C)
         timesteps = jnp.array(timestep) if not isinstance(timestep, jnp.ndarray) else timestep
         timesteps = jnp.broadcast_to(timesteps, (sample.shape[0]))
@@ -126,8 +126,12 @@ class ConditionalUnet1D(nn.Module):
 
         global_feature = diffusion_step_encoder(timesteps) # (B, dim)
 
+        conds = [global_feature]
         if global_cond is not None:
-            global_feature = jnp.concatenate([global_feature, global_cond], axis=-1)
+            conds.append(global_cond)
+        if goal_img_cond is not None:
+            conds.append(goal_img_cond)
+        global_feature = jnp.concatenate(conds, axis=-1)
 
         x = sample
         h = []

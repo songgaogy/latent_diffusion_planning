@@ -37,11 +37,16 @@ class LiberoLatentDataset(LiberoDataset):
       * else -> read from the raw hdf5 like the base class.
     """
 
-    def __init__(self, *, latent_path, **kwargs):
+    def __init__(self, *, latent_path, goal_keys=None, cache_all_in_ram=False, **kwargs):
         super().__init__(**kwargs)
         self.latent_path = os.path.expanduser(latent_path)
+        self.goal_keys = tuple(goal_keys or ())
         self._latent_handle = None
+        self.cache_all_in_ram = bool(cache_all_in_ram)
+        self._ram_demo_arrays = None
         self._validate_latent_demo_ids()
+        if self.cache_all_in_ram:
+            self._preload_all_demo_arrays()
 
     @property
     def latent_file(self):
@@ -87,6 +92,85 @@ class LiberoLatentDataset(LiberoDataset):
         latent_key = key[len("latent_"):]
         return self.latent_file["data"][demo_id]["latent"][latent_key][seq_start:seq_end]
 
+    def _read_demo_arrays_from_groups(self, demo_grp, latent_grp):
+        arrays = {"data": {}, "obs": {}}
+        for key in self.dataset_keys:
+            arr = demo_grp[key][:]
+            arrays["data"][key] = arr.astype(np.float32, copy=False) if arr.dtype != np.float32 else arr
+        for key in self.obs_keys:
+            if key == "optimal":
+                continue
+            if key.startswith("latent_"):
+                latent_key = key[len("latent_"):]
+                arr = latent_grp["latent"][latent_key][:]
+            else:
+                arr = demo_grp["obs"][key][:]
+            arrays["obs"][key] = arr.astype(np.float32, copy=False) if arr.dtype != np.float32 else arr
+        return arrays
+
+    def _read_demo_arrays(self, demo_idx):
+        path, dk, _L, _global_start = self.demos[demo_idx]
+        demo_id = self.demo_ids[demo_idx]
+        f = self._get_file(path)
+        demo_grp = f["data"][dk]
+        latent_grp = self.latent_file["data"][demo_id]
+        return self._read_demo_arrays_from_groups(demo_grp, latent_grp)
+
+    def _preload_all_demo_arrays(self):
+        ram_arrays = []
+        total_bytes = 0
+        with h5py.File(self.latent_path, "r", swmr=self.hdf5_use_swmr, libver="latest") as latent_f:
+            raw_handles = {}
+            try:
+                for demo_idx, (path, dk, _L, _global_start) in enumerate(self.demos):
+                    if path not in raw_handles:
+                        raw_handles[path] = h5py.File(
+                            path, "r", swmr=self.hdf5_use_swmr, libver="latest"
+                        )
+                    demo_grp = raw_handles[path]["data"][dk]
+                    latent_grp = latent_f["data"][self.demo_ids[demo_idx]]
+                    arrays = self._read_demo_arrays_from_groups(demo_grp, latent_grp)
+                    total_bytes += sum(arr.nbytes for group in arrays.values() for arr in group.values())
+                    ram_arrays.append(arrays)
+            finally:
+                for handle in raw_handles.values():
+                    handle.close()
+        self._ram_demo_arrays = ram_arrays
+        print(
+            f"[LiberoLatentDataset] cached {len(ram_arrays)} demos in RAM "
+            f"({total_bytes / (1024 ** 2):.1f} MiB)"
+        )
+
+    def _get_demo_arrays(self, demo_idx):
+        if self._ram_demo_arrays is not None:
+            return self._ram_demo_arrays[demo_idx]
+        return super()._get_demo_arrays(demo_idx)
+
+    def _read_goal_obs(self, demo_idx):
+        if not self.goal_keys:
+            return None
+        arrays = self._ram_demo_arrays[demo_idx] if self._ram_demo_arrays is not None else None
+        demo_id = self.demo_ids[demo_idx]
+        goal_obs = {}
+        for key in self.goal_keys:
+            if arrays is not None and key in arrays["obs"]:
+                arr = arrays["obs"][key][-1]
+            elif key.startswith("latent_"):
+                latent_key = key[len("latent_"):]
+                arr = self.latent_file["data"][demo_id]["latent"][latent_key][-1]
+            else:
+                path, dk, _L, _global_start = self.demos[demo_idx]
+                arr = self._get_file(path)["data"][dk]["obs"][key][-1]
+            goal_obs[key] = arr.astype(np.float32, copy=False) if arr.dtype != np.float32 else arr
+        return goal_obs
+
+    def _get_batch(self, demo_idx, local_index):
+        batch = super()._get_batch(demo_idx, local_index)
+        goal_obs = self._read_goal_obs(demo_idx)
+        if goal_obs is not None:
+            batch["goal_obs"] = goal_obs
+        return batch
+
 
 class LiberoLatentData:
     """Hydra wrapper. Mirrors LiberoData API, swapping in LiberoLatentDataset."""
@@ -110,6 +194,7 @@ class LiberoLatentData:
         env_params,
         train_per_file_n_overfit=None,
         eval_per_file_n_overfit=None,
+        cache_all_in_ram=False,
     ):
         self.name = name
         self.train_paths = _resolve_paths(train_paths)
@@ -126,6 +211,7 @@ class LiberoLatentData:
         self.n_workers = n_workers
         self.prefetch_factor = prefetch_factor
         self.obs_horizon = obs_horizon
+        self.cache_all_in_ram = cache_all_in_ram
 
         self.meta = meta
         self.env_params = OmegaConf.to_container(env_params, resolve=True)
@@ -133,6 +219,7 @@ class LiberoLatentData:
         self._train_dataset = None
         self._val_dataset = None
 
+        goal_keys = list(getattr(meta, "goal_rgb_obs", []))
         obs_keys = list(meta.lowdim_obs) + list(meta.rgb_obs)
         self.ds_kwargs = dict(
             obs_keys=obs_keys,
@@ -141,6 +228,7 @@ class LiberoLatentData:
             seq_length=seq_length,
             hdf5_use_swmr=hdf5_use_swmr,
             rgb_keys=list(meta.rgb_obs),
+            goal_keys=goal_keys,
             optimal=1,
         )
 
@@ -150,6 +238,7 @@ class LiberoLatentData:
             self._train_dataset = LiberoLatentDataset(
                 hdf5_paths=self.train_paths,
                 latent_path=self.train_latent_path,
+                cache_all_in_ram=self.cache_all_in_ram,
                 n_overfit=self.train_n_episode_overfit,
                 per_file_n_overfit=self.train_per_file_n_overfit,
                 **self.ds_kwargs,
@@ -164,6 +253,7 @@ class LiberoLatentData:
             self._val_dataset = LiberoLatentDataset(
                 hdf5_paths=paths,
                 latent_path=latent,
+                cache_all_in_ram=self.cache_all_in_ram,
                 n_overfit=self.eval_n_episode_overfit,
                 per_file_n_overfit=self.eval_per_file_n_overfit,
                 **self.ds_kwargs,

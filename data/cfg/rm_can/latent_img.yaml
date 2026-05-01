@@ -54,11 +54,11 @@ meta:
         min: 0
         max: 1
       latent_agentview_image:
-        min: -10
-        max: 10
+        min: -5.7106
+        max: 5.7279
       latent_robot0_eye_in_hand_image:
-        min: -5
-        max: 5
+        min: -6.5991
+        max: 6.4220
     actions:
       clip_min: -1
       clip_max: 1

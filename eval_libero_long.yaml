@@ -9,7 +9,7 @@ before: -1
 use_ema: false
 
 # eval-only overrides
-n_videos: 5
+n_videos: 10
 n_eval_episodes: 50
 n_eval_processes: 5
 seed: 1111111

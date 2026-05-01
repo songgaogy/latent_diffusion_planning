@@ -8,6 +8,7 @@ obs_horizon: ${obs_horizon}
 prefetch_factor: 2
 seq_length: ${horizon}
 hdf5_use_swmr: true
+cache_all_in_ram: true
 
 # data paths — planner/IDM trains only on libero_10
 train_paths: data/libero/libero_10/*demo.hdf5
@@ -23,6 +24,7 @@ eval_per_file_n_overfit: 2
 meta:
   lowdim_obs: [ee_states, gripper_states]
   rgb_obs: [latent_agentview_rgb, latent_eye_in_hand_rgb]
+  goal_rgb_obs: [latent_agentview_rgb, latent_eye_in_hand_rgb]
   rgb_viz: latent_agentview_rgb
   shape_meta:
     ac_dim: 7
@@ -32,8 +34,9 @@ meta:
       joint_states: [7]
       agentview_rgb: [256, 256, 3]
       eye_in_hand_rgb: [256, 256, 3]
-      latent_agentview_rgb: [4096]
-      latent_eye_in_hand_rgb: [4096]
+      # Current LIBERO VAE uses 6 down blocks: 256x256 -> 8x8x4 latent.
+      latent_agentview_rgb: [256]
+      latent_eye_in_hand_rgb: [256]
       optimal: [1]
     use_images: True
   obs_normalization:
@@ -44,11 +47,9 @@ meta:
       gripper_states:
         min: [-0.001,   -0.04112]
         max: [ 0.04158,  0.00136]
-      # FILL AFTER PREPROCESSING:
-      # scripts/compute_libero_latent_stats.py reads min_z/max_z from
-      # latent.hdf5 attrs and prints these; until then keep symmetric defaults.
-      latent_agentview_rgb:   {min: -10, max: 10}
-      latent_eye_in_hand_rgb: {min: -10, max: 10}
+      # Fill after preprocessing with scripts/compute_libero_latent_stats.py.
+      latent_agentview_rgb:   {min: -5.7106, max: 5.7279}
+      latent_eye_in_hand_rgb: {min: -6.5991, max: 6.4220}
       optimal: {min: 0, max: 1}
     actions:
       clip_min: -1
@@ -57,6 +58,10 @@ meta:
 env_params:
   obs_horizon: ${obs_horizon}
   rgb_viz: agentview_rgb
+  goal_latent_path: ${data.train_latent_path}
+  goal_demo_paths: ${data.train_paths}
+  goal_rgb_obs: ${data.meta.goal_rgb_obs}
+  goal_selection: seeded_random_demo
   env_kwargs:
     task_suite: libero_10
     task_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]

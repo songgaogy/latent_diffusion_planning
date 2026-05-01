@@ -60,6 +60,32 @@ def _stdio():
 
 def _build_env(init_args):
     """Instantiate one LIBERO env from the init handshake."""
+    import logging
+
+    robosuite_log_path = os.environ.get("ROBOSUITE_LOG_PATH")
+    if robosuite_log_path:
+        raw_file_handler = logging.FileHandler
+
+        def file_handler(filename, *args, **kwargs):
+            if os.fspath(filename) == "/tmp/robosuite.log":
+                filename = robosuite_log_path
+            return raw_file_handler(filename, *args, **kwargs)
+
+        logging.FileHandler = file_handler
+
+    try:
+        import numba
+
+        raw_jit = numba.jit
+
+        def jit_no_cache(*args, **kwargs):
+            kwargs["cache"] = False
+            return raw_jit(*args, **kwargs)
+
+        numba.jit = jit_no_cache
+    except Exception:
+        pass
+
     from libero.libero import benchmark, get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
 
@@ -83,8 +109,14 @@ def _build_env(init_args):
     return env, init_states, dict(suite_name=suite_name, task_id=task_id, bddl_file=bddl_file)
 
 
+def _env_done(env):
+    raw_env = getattr(env, "env", env)
+    return bool(getattr(raw_env, "done", False))
+
+
 def main():
     stdin, stdout = _stdio()
+    last_obs = None
 
     try:
         init_args = read_frame(stdin)
@@ -103,7 +135,8 @@ def main():
         try:
             if cmd == "reset":
                 raw = env.reset()
-                write_frame(stdout, {"obs": adapt_obs(raw)})
+                last_obs = adapt_obs(raw)
+                write_frame(stdout, {"obs": last_obs})
             elif cmd == "set_init_state":
                 idx = int(msg["idx"]) % len(init_states)
                 raw = env.set_init_state(init_states[idx])
@@ -111,17 +144,35 @@ def main():
                 # if None, do an env step with zero action to fetch one.
                 if raw is None:
                     raw, _, _, _ = env.step(np.zeros(env.action_dim if hasattr(env, "action_dim") else 7))
-                write_frame(stdout, {"obs": adapt_obs(raw)})
+                last_obs = adapt_obs(raw)
+                write_frame(stdout, {"obs": last_obs})
             elif cmd == "step":
                 action = np.asarray(msg["action"], dtype=np.float64)
-                raw, reward, done, info = env.step(action)
+                try:
+                    raw, reward, done, info = env.step(action)
+                except ValueError as e:
+                    if "terminated episode" not in str(e) or last_obs is None:
+                        raise
+                    success = bool(env.check_success())
+                    write_frame(
+                        stdout,
+                        {
+                            "obs": last_obs,
+                            "reward": 0.0,
+                            "done": True,
+                            "success": success,
+                        },
+                    )
+                    continue
+                last_obs = adapt_obs(raw)
                 success = bool(env.check_success())
+                done = bool(done) or success or _env_done(env)
                 write_frame(
                     stdout,
                     {
-                        "obs": adapt_obs(raw),
+                        "obs": last_obs,
                         "reward": float(reward),
-                        "done": bool(done),
+                        "done": done,
                         "success": success,
                     },
                 )

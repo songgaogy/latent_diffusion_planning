@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from agent.ldp_agent import LDPAgent  # noqa: E402
+from networks.diffusion_nets_v2 import ConditionalUnet1D  # noqa: E402
 
 
 def test_two_camera_latent_shapes_rank3():
@@ -100,12 +101,51 @@ def test_vae_decode_dim_table_recognises_new_cases():
         assert f"vae_feature_dim'] == {dim}" in src, dim
 
 
+def test_goal_cond_two_camera_shapes():
+    B = 4
+    D = 256
+    goal_obs = {
+        "latent_agentview_rgb": jnp.zeros((B, 8, 8, 4), dtype=jnp.float32),
+        "latent_eye_in_hand_rgb": jnp.zeros((B, D), dtype=jnp.float32),
+    }
+    out = LDPAgent._get_goal_cond(
+        goal_obs,
+        ["latent_agentview_rgb", "latent_eye_in_hand_rgb"],
+    )
+    assert out.shape == (B, 2 * D), out.shape
+
+
+def test_conditional_unet_goal_cond_forward():
+    B, T, D = 2, 4, 16
+    model = ConditionalUnet1D(
+        input_dim=D,
+        global_cond_dim=24,
+        down_dims=(32, 64),
+        downsample=True,
+    )
+    sample = jnp.zeros((B, T, D), dtype=jnp.float32)
+    timestep = jnp.zeros((B,), dtype=jnp.int32)
+    global_cond = jnp.zeros((B, 8), dtype=jnp.float32)
+    goal_img_cond = jnp.zeros((B, 16), dtype=jnp.float32)
+    params = model.init(
+        jnp.asarray([0, 1], dtype=jnp.uint32),
+        sample,
+        timestep,
+        global_cond,
+        goal_img_cond=goal_img_cond,
+    )
+    out = model.apply(params, sample, timestep, global_cond, goal_img_cond=goal_img_cond)
+    assert out.shape == sample.shape, out.shape
+
+
 if __name__ == "__main__":
     fns = [
         test_two_camera_latent_shapes_rank3,
         test_two_camera_latent_shapes_rank5,
         test_temporal_alignment_preserved,
         test_vae_decode_dim_table_recognises_new_cases,
+        test_goal_cond_two_camera_shapes,
+        test_conditional_unet_goal_cond_forward,
     ]
     failed = 0
     for fn in fns:

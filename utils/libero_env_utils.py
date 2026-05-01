@@ -17,11 +17,66 @@ from collections import deque
 from pathlib import Path
 from typing import List
 
+import h5py
 import numpy as np
 import psutil
 import torch.multiprocessing as mp
 
 import jax
+from data.libero_data import _resolve_paths
+
+
+def _single_prng_key(key):
+    return jax.numpy.asarray(np.asarray(jax.device_get(key)).reshape(-1, 2)[0], dtype=jax.numpy.uint32)
+
+
+def _sorted_demo_keys(h5_group):
+    keys = list(h5_group.keys())
+    keys.sort(key=lambda k: int(k.split("_")[-1]) if k.split("_")[-1].isdigit() else 0)
+    return keys
+
+
+def _build_goal_bank(env_params):
+    latent_path = env_params.get("goal_latent_path")
+    goal_demo_paths = env_params.get("goal_demo_paths")
+    goal_rgb_obs = list(env_params.get("goal_rgb_obs", []))
+    if not latent_path or not goal_demo_paths or not goal_rgb_obs:
+        return None
+
+    demo_paths = _resolve_paths(goal_demo_paths)
+    if not demo_paths:
+        raise ValueError(f"goal_demo_paths resolved to empty: {goal_demo_paths}")
+
+    goal_bank = {}
+    with h5py.File(os.path.expanduser(latent_path), "r") as latent_f:
+        latent_data = latent_f["data"]
+        for task_id, path in enumerate(demo_paths):
+            goals = []
+            with h5py.File(path, "r", swmr=True, libver="latest") as raw_f:
+                for demo_key in _sorted_demo_keys(raw_f["data"]):
+                    demo_id = f"{Path(path).stem}__{demo_key}"
+                    if demo_id not in latent_data:
+                        continue
+                    goal = {}
+                    for key in goal_rgb_obs:
+                        latent_key = key[len("latent_"):] if key.startswith("latent_") else key
+                        goal[key] = np.asarray(latent_data[demo_id]["latent"][latent_key][-1], dtype=np.float32)
+                    goals.append(goal)
+            if goals:
+                goal_bank[task_id] = goals
+    if not goal_bank:
+        raise ValueError(f"No goal latents found in {latent_path}")
+    return goal_bank
+
+
+def _select_goal_obs(goal_bank, task_ids, seeds):
+    goal_obs = {}
+    for task_id, seed in zip(task_ids, seeds):
+        goals = goal_bank[int(task_id)]
+        goal = goals[int(np.random.default_rng(int(seed)).integers(len(goals)))]
+        for key, value in goal.items():
+            goal_obs.setdefault(key, []).append(value)
+    return {key: np.asarray(value, dtype=np.float32) for key, value in goal_obs.items()}
 
 
 class LiberoEvalProc:
@@ -36,6 +91,7 @@ class LiberoEvalProc:
         obs_horizon: int,
         rgb_viz: str,
         terminal_queue: mp.Queue,
+        mp_context=None,
     ):
         self.seeds = seeds
         self.process_id = process_id
@@ -43,8 +99,9 @@ class LiberoEvalProc:
         self.obs_horizon = obs_horizon
         self.rgb_viz = rgb_viz
         self.terminal_queue = terminal_queue
-        self.send_queue = mp.Queue()
-        self.recv_queue = mp.Queue()
+        mp_context = mp_context or mp
+        self.send_queue = mp_context.Queue()
+        self.recv_queue = mp_context.Queue()
 
     def start(self):
         try:
@@ -97,7 +154,7 @@ class LiberoEvalProc:
                 success = False
 
                 while True:
-                    self.send_queue.put((self.process_id, obs_deque))
+                    self.send_queue.put((self.process_id, obs_deque, task_id, seed))
                     out = self.recv_queue.get()
                     if len(out) == 1:
                         action = out[0]
@@ -158,14 +215,18 @@ def run_libero_eval(
     branch from train_bc.py / eval_bc.py."""
     assert n_rollout % n_proc == 0, f"n_rollout={n_rollout} not divisible by n_proc={n_proc}"
     rollouts_per_proc = n_rollout // n_proc
+    eval_rng = _single_prng_key(eval_rng)
 
     obs_horizon = env_params["obs_horizon"]
     rgb_viz = env_params["rgb_viz"]
     env_kwargs = dict(env_params["env_kwargs"])
     rgb_obs = list(env_kwargs["rgb_obs"])
     lowdim_obs = list(env_kwargs.get("lowdim_obs", []))
+    use_goal_cond = bool(getattr(policy, "config", {}).get("use_goal_cond", False))
+    goal_bank = _build_goal_bank(env_params) if use_goal_cond else None
 
-    terminal_queue = mp.Queue()
+    mp_context = mp.get_context("spawn")
+    terminal_queue = mp_context.Queue()
     procs = []
     for i in range(n_proc):
         seeds = list(range(seed + i * rollouts_per_proc, seed + (i + 1) * rollouts_per_proc))
@@ -177,13 +238,14 @@ def run_libero_eval(
                 obs_horizon=obs_horizon,
                 rgb_viz=rgb_viz,
                 terminal_queue=terminal_queue,
+                mp_context=mp_context,
             )
         )
 
     put_queues = {i: p.recv_queue for i, p in enumerate(procs)}
     get_queues = {i: p.send_queue for i, p in enumerate(procs)}
 
-    processes = {i: mp.Process(target=p.start) for i, p in enumerate(procs)}
+    processes = {i: mp_context.Process(target=p.start) for i, p in enumerate(procs)}
     for _, pp in processes.items():
         pp.start()
 
@@ -210,6 +272,8 @@ def run_libero_eval(
 
         # batch obs requests across workers, run a single jax inference
         idxs = []
+        task_ids = []
+        rollout_seeds = []
         obs_dict = {}
         for _, q in get_queues.items():
             if q.empty():
@@ -218,6 +282,8 @@ def run_libero_eval(
             obs_deque = data[1]
             if isinstance(obs_deque, list) and len(obs_deque) and isinstance(obs_deque[0], dict) and obs_deque[0].get("reset", False):
                 continue
+            task_ids.append(data[2] if len(data) > 2 else 0)
+            rollout_seeds.append(data[3] if len(data) > 3 else seed)
             for k in obs_deque[0].keys():
                 v = np.stack([x[k] for x in obs_deque])
                 obs_dict.setdefault(k, []).append(v)
@@ -246,18 +312,26 @@ def run_libero_eval(
                 f"env produced obs missing keys {missing}; got {sorted(obs_dict)}"
             )
         obs_dict = {k: obs_dict[k] for k in agent_obs_dims}
+        batch = dict(obs=obs_dict)
+        if goal_bank is not None:
+            missing_goal_tasks = sorted(set(task_ids) - set(goal_bank))
+            if missing_goal_tasks:
+                raise RuntimeError(f"goal bank missing task ids {missing_goal_tasks}")
+            batch["goal_obs"] = _select_goal_obs(goal_bank, task_ids, rollout_seeds)
 
+        eval_rng = _single_prng_key(eval_rng)
         s_rng, eval_rng = jax.random.split(eval_rng)
+        s_rng = _single_prng_key(s_rng)
         visualize_plan = policy.config["name"] in ("ldp_agent", "ldp_hier_agent")
         if visualize_plan:
-            batch_action, plan_dict = policy.sample_viz(dict(obs=obs_dict), s_rng)
+            batch_action, plan_dict = policy.sample_viz(batch, s_rng)
             plan_viz = plan_dict["plan_viz"]
             plan_viz = (np.clip((np.array(plan_viz) + 1) / 2, 0, 1) * 255).astype(np.uint8)
             batch_action = np.array(jax.device_get(batch_action))
             for j, idx in enumerate(idxs):
                 put_queues[idx].put((batch_action[j], plan_viz[j]))
         else:
-            batch_action, _ = policy.sample(dict(obs=obs_dict), s_rng)
+            batch_action, _ = policy.sample(batch, s_rng)
             batch_action = np.array(jax.device_get(batch_action))
             for j, idx in enumerate(idxs):
                 put_queues[idx].put((batch_action[j],))

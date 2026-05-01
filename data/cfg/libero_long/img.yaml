@@ -10,6 +10,7 @@ seq_length: ${horizon}
 hdf5_use_swmr: true
 
 # data paths — planner/IDM trains only on libero_10
+# NOTE: libero_long refers to libero_10 dataset
 train_paths: data/libero/libero_10/*demo.hdf5
 eval_paths: null
 train_n_episode_overfit: null

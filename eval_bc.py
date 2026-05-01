@@ -124,16 +124,18 @@ class Workspace:
             all_metrics = []
             for i in range(10):
                 batch = next(data_iter)
-                metrics_rng, sample_rng, eval_rng = jax.random.split(eval_rng, 3)
+                metrics_rng, sample_rng, plan_rng, eval_rng = jax.random.split(eval_rng, 4)
                 metrics = agent.get_metrics(batch, metrics_rng)
                 if self.cfg.agent.name.startswith("dp"):
                     pred_action_full, _ = agent.sample(batch, sample_rng)                
                     H = pred_action_full.shape[1]
                     metrics['full_action_mse'] = jnp.mean(jnp.square(batch['actions'][:, :H, :] - pred_action_full))
                 else:
-                    pred_action = agent.sample_action(batch, sample_rng)
+                    pred_action_out = agent.sample_action(batch, sample_rng)
+                    pred_action = pred_action_out[0] if isinstance(pred_action_out, tuple) else pred_action_out
                     H = pred_action.shape[1]
                     metrics['action_mse'] = jnp.mean(jnp.square(batch['actions'][:, :H, :] - pred_action[:, :H, :]))
+                    metrics['teacher_forced_idm_action_mse'] = metrics['action_mse']
                     metrics['action_mse_0'] = jnp.mean(jnp.square(batch['actions'][:, 0, :] - pred_action[:, 0, :]))
                     try:
                         metrics['action_mse_1'] = jnp.mean(jnp.square(batch['actions'][:, 1, :] - pred_action[:, 1, :]))
@@ -141,7 +143,7 @@ class Workspace:
                     except:
                         pass
                     if self.cfg.agent.use_planner:
-                        pred_action_full, stats = agent.sample(batch, sample_rng)            
+                        pred_action_full, stats = agent.sample(batch, plan_rng)            
                         H = pred_action_full.shape[1]
                         metrics['full_action_mse'] = jnp.mean(jnp.square(batch['actions'][:, :H, :] - pred_action_full))
                         metrics['full_action_mse_0'] = jnp.mean(jnp.square(batch['actions'][:, 0, :] - pred_action_full[:, 0, :]))
@@ -185,6 +187,8 @@ class Workspace:
             metrics.update(env_metrics)
         elif "libero" in self.data.name:
             import utils.libero_env_utils as libero_env_utils
+            eval_loss_metrics, _ = self.eval_loss(agent, eval_rng)
+            metrics.update(eval_loss_metrics)
             self.timer.tock("time/eval")
             env_params = self.data.env_params
             env_metrics, videos = libero_env_utils.run_libero_eval(env_params, agent, agent.config['name'], self.cfg.n_eval_episodes, self.cfg.n_eval_processes, self.cfg.seed, eval_rng)

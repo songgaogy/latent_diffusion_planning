@@ -70,6 +70,8 @@ def normalize_unnormalize_obs(batch, obs_normalization, normalize):
 def postprocess_batch(batch, obs_normalization):
     new_batch = dict()
     new_batch["obs"] = normalize_obs(batch["obs"], obs_normalization["obs"])
+    if "goal_obs" in batch:
+        new_batch["goal_obs"] = normalize_obs(batch["goal_obs"], obs_normalization["obs"])
     new_batch["actions"] = normalize_obs(dict(actions=batch["actions"]), obs_normalization)["actions"]
     return new_batch
 
@@ -77,6 +79,8 @@ def postprocess_batch_obs(batch, obs_normalization):
     # THIS IS UGLY! But I'm too lazy to fix.
     new_batch = dict()
     new_batch["obs"] = normalize_obs(batch["obs"], obs_normalization["obs"])
+    if "goal_obs" in batch:
+        new_batch["goal_obs"] = normalize_obs(batch["goal_obs"], obs_normalization["obs"])
     return new_batch
 
 
@@ -108,4 +112,3 @@ def quat2axisangle_batch(quats):
     valid = ~zero_rotation
     axis_angles[valid] = (quats[valid, :3] * 2.0 * np.arccos(quats[valid, 3][..., None])) / den[valid][..., None]
     return axis_angles
-

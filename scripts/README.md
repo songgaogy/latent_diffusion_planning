@@ -5,12 +5,12 @@
 bash scripts/train_vae_libero.bash
 ```
 
-2. Preprocess `libero_10` -> `latent.hdf5`
+2. Preprocess `libero_10` -> `latent.hdf5` (libero_long refers to libero_10)
 ```bash
 bash scripts/preprocess_libero.bash \
   experiment_folder=libero_long \
   experiment_name=preproc01 \
-  restore_snapshot_path=$(pwd)/experiments/libero_vae/vae_all256/ckpt/100000.ckpt
+  restore_snapshot_path=$(pwd)/experiments/libero_vae/vae_all256/ckpt/200000.ckpt
 ```
 
 3. Generate/write `latent stats` into the latent YAML
@@ -24,8 +24,9 @@ PY="$(resolve_ldp_python)"
 4. Train LDP
 ```bash
 bash scripts/train_ldp_libero_long.bash \
-  agent.vae_pretrain_path=$(pwd)/experiments/libero_vae/vae_all256/ckpt/100000.ckpt \
-  data.train_latent_path=$(pwd)/experiments/libero_long/preproc01/latent.hdf5
+  agent.vae_pretrain_path=$(pwd)/experiments/libero_vae/vae_all256/ckpt/200000.ckpt \
+  data.train_latent_path=$(pwd)/experiments/libero_long/preproc01/latent.hdf5 \
+  experiment_name="ldp_goal_cond_v0"
 ```
 
 5. Evaluation
@@ -33,6 +34,6 @@ bash scripts/train_ldp_libero_long.bash \
 bash scripts/eval_ldp_libero_long.bash \
   experiment_folder=libero_long \
   experiment_name=ldp_long01 \
-  agent.vae_pretrain_path=... \
-  data.train_latent_path=...
+  agent.vae_pretrain_path=$(pwd)/experiments/libero_vae/vae_all256/ckpt/200000.ckpt \
+  data.train_latent_path=$(pwd)/experiments/libero_long/preproc01/latent.hdf5
 ```

@@ -40,6 +40,8 @@ use_idm: True
 # policy input
 lowdim_obs: ${data.meta.lowdim_obs}
 rgb_obs: ${data.meta.rgb_obs}
+goal_rgb_obs: []
+use_goal_cond: False
 data_name: ${data.name}
 obs_normalization: ${data.meta.obs_normalization}
 

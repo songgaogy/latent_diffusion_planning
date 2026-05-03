@@ -77,6 +77,12 @@ class Workspace:
         agent, rng = self.init_agent(rng, init_batch)
         self.timer.tock("time/init_agent")
 
+        # Replicate agent across devices once. eval_loss feeds sharded batches
+        # to JIT'd methods, which fail if the agent params live only on dev 0.
+        devices = jax.local_devices()
+        sharding = jax.sharding.PositionalSharding(devices)
+        agent = jax.device_put(jax.tree.map(jnp.asarray, agent), sharding.replicate())
+
         files = glob.glob(str(self.eval_dir / '*.ckpt'))
         files.sort(key=lambda file: int(Path(file).name.split('.')[0]))
         pattern = r"^(?P<ts>\d+)\.ckpt"
@@ -84,7 +90,7 @@ class Workspace:
         for file in files:
             file = Path(file)
             file_name = file.name
-            matches = re.search(pattern, file_name) 
+            matches = re.search(pattern, file_name)
             if matches is None:
                 print(f"skipping {file_name}")
                 continue
@@ -97,6 +103,8 @@ class Workspace:
             agent = self.load_snapshot(agent, file)
             if self.cfg.restore_idm_snapshot_path is not None:
                 agent = self.load_snapshot(agent, self.cfg.restore_idm_snapshot_path)
+            # re-replicate after restoring fresh leaves into agent state
+            agent = jax.device_put(jax.tree.map(jnp.asarray, agent), sharding.replicate())
 
             self.epoch = snapshot_step
             self.step = snapshot_step
@@ -215,7 +223,15 @@ class Workspace:
     def load_snapshot(self, agent, file):
         print(f"loading checkpoint from {file}")
         restored_prefixes = []
-        raw_restored = self.ckpter.restore(file)
+        # Newer orbax refuses to restore raw arrays without sharding info.
+        # Build a target from the agent's current params so leaves are placed
+        # with matching shape/dtype/sharding.
+        target = dict(agent.get_params())
+        restore_args = orbax_utils.restore_args_from_target(target)
+        raw_restored = self.ckpter.restore(
+            file, item=target, restore_args=restore_args,
+            transforms={}, transforms_default_to_original=True,
+        )
         for k in raw_restored.keys():
             if k == "encoder_params":
                 if self.cfg.agent.shared_encoder:

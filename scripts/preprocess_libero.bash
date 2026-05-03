@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_NAME=${WANDB_NAME:-songgao-personal}
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 
 source scripts/env_helpers.bash
 PY="$(resolve_ldp_python)"

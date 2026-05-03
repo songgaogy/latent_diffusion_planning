@@ -139,6 +139,66 @@ class LDPAgent(flax.struct.PyTreeNode):
         return new_batch
 
     @jax.jit
+    def vae_decode_full(self, full_latent):
+        """Decode an *untruncated* per-camera latent.
+
+        Used by sample_viz_step to render the start frame of the plan video
+        from the full (8,8,4) latent we observe at inference, while predicted
+        future frames still go through the truncated `vae_decode` path
+        (planner only outputs `vae_feature_dim` dims). Without this the
+        right-hand video panel shows a partly-zero-padded latent and the
+        decoder hallucinates the missing rows.
+
+        Accepts shape (B, H, 8, 8, 4) or (B, H, 256); both are reshaped to
+        (B*H, 8, 8, 4) for the decoder.
+        """
+        B, H = full_latent.shape[:2]
+        z = full_latent.reshape(B * H, 8, 8, 4)
+        key = self.config['rgb_obs'][0]
+        z = unnormalize_obs({key: z}, self.obs_normalization['obs'])[key]
+        reconstruct = self.vae_module.apply({"params": self.vae_params}, z, method=self.vae_module.decode).sample
+        reconstruct = reconstruct.reshape(B, H, *reconstruct.shape[1:])
+        return reconstruct
+
+    @staticmethod
+    def _spatial_project_latent(feat, vae_feature_dim, data_name):
+        """Project a per-camera SD-VAE latent into the planner's
+        ``vae_feature_dim`` slot.
+
+        Two strategies:
+          * libero + vae_feature_dim==64: 2x2 spatial avg-pool on the 8x8
+            grid (keep all 4 channels). Pooled latent has 4*4*4=64 dims and
+            every cell still represents a region of the original image, so
+            the planner sees the table / objects / gripper instead of just
+            the top-2-rows wallpaper strip the legacy "first 64 flat dims"
+            truncation kept.
+          * otherwise: legacy ``[..., :vae_feature_dim]`` flat truncation,
+            so rm_lift / aloha runs are unaffected.
+
+        Accepts ``feat`` of shape (..., 256) (post-vae_encode flat) or
+        (..., 8, 8, 4) (pre-encoded latent.hdf5). Returns (..., vfd).
+        """
+        is_spatial = (
+            feat.ndim >= 3
+            and feat.shape[-3] == 8
+            and feat.shape[-2] == 8
+            and feat.shape[-1] == 4
+        )
+        if is_spatial:
+            spatial = feat
+        else:
+            # flat (..., 256) -> (..., 8, 8, 4)
+            spatial = feat.reshape(*feat.shape[:-1], 8, 8, 4)
+        leading = spatial.shape[:-3]
+        if "libero" in (data_name or "") and vae_feature_dim == 64:
+            # reshape (8, 8, 4) -> (4, 2, 4, 2, 4) and avg over the two
+            # length-2 axes (the within-block H/W axes).
+            pooled = spatial.reshape(*leading, 4, 2, 4, 2, 4).mean(axis=(-2, -4))
+            return pooled.reshape(*leading, vae_feature_dim)
+        # legacy truncation
+        return spatial.reshape(*leading, -1)[..., :vae_feature_dim]
+
+    @jax.jit
     def vae_decode(self, feats):
         B, H = feats.shape[:2]
         if self.config['vae_feature_dim'] == 16:
@@ -152,7 +212,15 @@ class LDPAgent(flax.struct.PyTreeNode):
             z = feats.reshape(B * H, 3, 3, 4)
         elif self.config['vae_feature_dim'] == 64:
             feats = feats[:, :, :64]
-            z = feats.reshape(B * H, 4, 4, 4)
+            if "libero" in self.config["data_name"]:
+                # planner output is the 2x2 spatial-avg-pooled libero latent
+                # ((4,4,4) shape, mirroring _spatial_project_latent). Nearest-
+                # upsample 4x4 -> 8x8 to feed SD-VAE decoder, which expects
+                # 8x8x4 for 256x256 reconstructions.
+                z = feats.reshape(B * H, 4, 4, 4)
+                z = jnp.repeat(jnp.repeat(z, 2, axis=1), 2, axis=2)
+            else:
+                z = feats.reshape(B * H, 4, 4, 4)
         elif self.config['vae_feature_dim'] == 256:
             # 256x256 SD-VAE input -> 32x32x4 latent; take first 256 flat dims
             # reshaped as 8x8x4 for the (learned, upsampling) decoder.
@@ -176,24 +244,34 @@ class LDPAgent(flax.struct.PyTreeNode):
         lowdim_obs_cond = jnp.concatenate([batch[key] for key in self.config['lowdim_obs']], axis=-1).astype(jnp.float32)
         B, H = lowdim_obs_cond.shape[:2]
         lowdim_obs_cond = lowdim_obs_cond.reshape(-1, *lowdim_obs_cond.shape[2:])
-        # flatten each per-camera latent to (B, H, -1) BEFORE concatenating so
-        # that two cameras stack along the feature axis, not along time.
-        # (Concatenating raw rank-5 latents on axis=1 misaligns time when later
-        # reshaped to (B, H, -1).)
-        per_cam = [batch[key].reshape(B, H, -1) for key in self.config['rgb_obs']]
+        # Per-camera image latent -> vae_feature_dim, via _spatial_project_latent
+        # (2x2 avg-pool for libero+64, legacy flat truncation otherwise).
+        per_cam = [
+            self._spatial_project_latent(
+                batch[key],
+                self.config['vae_feature_dim'],
+                self.config.get('data_name'),
+            )
+            for key in self.config['rgb_obs']
+        ]
         image_features = jnp.concatenate(per_cam, axis=-1)
         lowdim_obs_cond = lowdim_obs_cond.reshape(B, H, -1)
         obs_cond = jnp.concatenate([image_features, lowdim_obs_cond], axis=-1)
         return obs_cond
 
     @classmethod
-    def _get_obs_cond(cls, batch, rgb_obs, lowdim_obs, obs_horizon, init_enc_rng=None):
+    def _get_obs_cond(cls, batch, rgb_obs, lowdim_obs, obs_horizon, init_enc_rng=None, vae_feature_dim=None, data_name=None):
         lowdim_obs_cond = jnp.concatenate([batch[key] for key in lowdim_obs], axis=-1).astype(jnp.float32)
         B, H = lowdim_obs_cond.shape[:2]
         lowdim_obs_cond = lowdim_obs_cond.reshape(-1, *lowdim_obs_cond.shape[2:])
 
-        # See get_obs_cond: flatten per-camera then concat on feature axis.
-        per_cam = [batch[key].reshape(B, H, -1) for key in rgb_obs]
+        if vae_feature_dim is not None:
+            per_cam = [
+                cls._spatial_project_latent(batch[key], vae_feature_dim, data_name)
+                for key in rgb_obs
+            ]
+        else:
+            per_cam = [batch[key].reshape(B, H, -1) for key in rgb_obs]
         image_features = jnp.concatenate(per_cam, axis=-1)
 
         lowdim_obs_cond = lowdim_obs_cond.reshape(B, H, -1)
@@ -201,16 +279,28 @@ class LDPAgent(flax.struct.PyTreeNode):
         return obs_cond
 
     @staticmethod
-    def _get_goal_cond(goal_obs, goal_rgb_obs):
+    def _get_goal_cond(goal_obs, goal_rgb_obs, vae_feature_dim=None, data_name=None):
         if goal_obs is None or len(goal_rgb_obs) == 0:
             return None
-        per_cam = [goal_obs[key].reshape(goal_obs[key].shape[0], -1) for key in goal_rgb_obs]
+        per_cam = []
+        for key in goal_rgb_obs:
+            v = goal_obs[key]
+            if vae_feature_dim is not None and key.startswith("latent_"):
+                v = LDPAgent._spatial_project_latent(v, vae_feature_dim, data_name)
+            else:
+                v = v.reshape(v.shape[0], -1)
+            per_cam.append(v)
         return jnp.concatenate(per_cam, axis=-1)
 
     def get_goal_cond(self, batch):
         if not self.config['use_goal_cond'] or 'goal_obs' not in batch:
             return None
-        return self._get_goal_cond(batch['goal_obs'], self.config['goal_rgb_obs'])
+        return self._get_goal_cond(
+            batch['goal_obs'],
+            self.config['goal_rgb_obs'],
+            self.config['vae_feature_dim'],
+            self.config.get('data_name'),
+        )
 
     def plan_loss(self, params, rng, obs_emb, obs_horizon, goal_img_cond=None):
         # noising
@@ -609,8 +699,19 @@ class LDPAgent(flax.struct.PyTreeNode):
         end = start + self.config['action_horizon']
         plan = noisy_next_obs[:, start:end, :] # (B, T, D)
         start_state = obs_emb[:, obs_horizon-1:obs_horizon, :] # during inference, only pass obs_horizon imgs
+
+        # Visualization split: start frame from full untruncated latent (so
+        # the left-most panel of the video is a clean reconstruction); the
+        # predicted action_horizon frames go through the truncated decode
+        # path because the planner only emits vae_feature_dim per cam.
+        rgb_viz_key = self.config['rgb_obs'][0]
+        start_full = batch['obs'][rgb_viz_key][:, obs_horizon - 1:obs_horizon]
+        plan_viz_start = self.vae_decode_full(start_full)
+        plan_viz_pred = self.vae_decode(plan)
+        plan_viz = jnp.concatenate((plan_viz_start, plan_viz_pred), axis=1)
+
+        # Combined latent sequence kept for the IDM (uses truncated dims).
         plan = jnp.concatenate((start_state, plan), axis=1)
-        plan_viz = self.vae_decode(plan)
 
         # IDM
         s_sprime = rearrange(jnp.concatenate((plan[:, :-1, :], plan[:, 1:, :]), axis=-1), 'B H D -> (B H) D')
@@ -670,7 +771,10 @@ class LDPAgent(flax.struct.PyTreeNode):
         goal_dim = 0
         if use_goal_cond:
             for key in goal_rgb_obs:
-                goal_dim += int(np.prod(shape_meta['all_shapes'][key]))
+                if key.startswith("latent_"):
+                    goal_dim += vae_feature_dim
+                else:
+                    goal_dim += int(np.prod(shape_meta['all_shapes'][key]))
         obs_dim = lowdim_obs_dim + vision_feature_dim
         action_dim = shape_meta['ac_dim']
 
@@ -706,12 +810,12 @@ class LDPAgent(flax.struct.PyTreeNode):
         init_action = batch['actions']
 
         # create encoder
-        obs_emb = LDPAgent._get_obs_cond(batch['obs'], rgb_obs, lowdim_obs, obs_horizon, init_enc_rng)
+        obs_emb = LDPAgent._get_obs_cond(batch['obs'], rgb_obs, lowdim_obs, obs_horizon, init_enc_rng, vae_feature_dim, data_name)
         goal_img_cond = None
         if use_goal_cond:
             if "goal_obs" not in batch:
                 raise ValueError("use_goal_cond=True requires batch['goal_obs']")
-            goal_img_cond = LDPAgent._get_goal_cond(batch['goal_obs'], goal_rgb_obs)
+            goal_img_cond = LDPAgent._get_goal_cond(batch['goal_obs'], goal_rgb_obs, vae_feature_dim, data_name)
 
         # create planner
         if use_planner:

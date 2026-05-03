@@ -10,7 +10,9 @@ the parent process using `policy.sample_viz` / `policy.sample`.
 """
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import time
 import traceback
 from collections import deque
@@ -36,6 +38,59 @@ def _sorted_demo_keys(h5_group):
     return keys
 
 
+def _resolve_libero_python() -> str:
+    """Find a python executable in the libero conda env.
+
+    Mirrors the lookup in envs.libero_remote_env so the parent (ldp env) can
+    spawn one-shot libero queries without importing libero (it is unimportable
+    here)."""
+    candidates = (
+        Path.home() / "anaconda3" / "envs" / "libero" / "bin" / "python",
+        Path.home() / "miniconda3" / "envs" / "libero" / "bin" / "python",
+        Path("/home/anaconda3/envs/libero/bin/python"),
+    )
+    override = os.environ.get("LIBERO_PYTHON")
+    if override and os.path.isfile(override) and os.access(override, os.X_OK):
+        return override
+    for p in candidates:
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    raise FileNotFoundError(
+        "Could not find a libero conda env python; set LIBERO_PYTHON or install one of "
+        + ", ".join(str(p) for p in candidates)
+    )
+
+
+def _query_benchmark_task_names(suite_name: str) -> List[str]:
+    """Return task names in benchmark order for ``suite_name``.
+
+    Spawns a one-shot subprocess in the libero env to read
+    ``benchmark.get_benchmark_dict()[suite]().get_task(i).name``. The result
+    is the ground-truth ordering used by the eval server when it loads bddls
+    via ``bench.get_task(task_id)``.
+    """
+    py = _resolve_libero_python()
+    code = (
+        "import json\n"
+        "from libero.libero import benchmark\n"
+        f"bench = benchmark.get_benchmark_dict()[{suite_name!r}]()\n"
+        "names = [bench.get_task(i).name for i in range(bench.n_tasks)]\n"
+        "print('__BENCH_NAMES__', json.dumps(names))\n"
+    )
+    out = subprocess.check_output([py, "-c", code], text=True, timeout=120)
+    for line in out.splitlines():
+        if line.startswith("__BENCH_NAMES__"):
+            return json.loads(line[len("__BENCH_NAMES__"):].strip())
+    raise RuntimeError(f"Could not parse libero task names from subprocess output:\n{out}")
+
+
+def _demo_file_task_name(path: str) -> str:
+    """Strip the ``_demo`` suffix off a libero hdf5 file stem to recover the
+    underlying task name (e.g. ``..._stove_demo.hdf5`` -> ``..._stove``)."""
+    stem = Path(path).stem
+    return stem[: -len("_demo")] if stem.endswith("_demo") else stem
+
+
 def _build_goal_bank(env_params):
     latent_path = env_params.get("goal_latent_path")
     goal_demo_paths = env_params.get("goal_demo_paths")
@@ -47,10 +102,27 @@ def _build_goal_bank(env_params):
     if not demo_paths:
         raise ValueError(f"goal_demo_paths resolved to empty: {goal_demo_paths}")
 
+    # Align demo files to libero benchmark task_ids. demo_paths are sorted
+    # alphabetically by glob, but the env loads bddls via bench.get_task(tid),
+    # whose ordering is *not* alphabetical. Without this remap, eval feeds the
+    # planner a goal latent for the wrong task.
+    suite_name = (env_params.get("env_kwargs") or {}).get("task_suite")
+    if not suite_name:
+        raise ValueError("env_params['env_kwargs']['task_suite'] is required for goal_bank alignment")
+    benchmark_names = _query_benchmark_task_names(suite_name)
+    name_to_bench_id = {name: i for i, name in enumerate(benchmark_names)}
+
     goal_bank = {}
     with h5py.File(os.path.expanduser(latent_path), "r") as latent_f:
         latent_data = latent_f["data"]
-        for task_id, path in enumerate(demo_paths):
+        for path in demo_paths:
+            task_name = _demo_file_task_name(path)
+            if task_name not in name_to_bench_id:
+                raise RuntimeError(
+                    f"demo file {path} task name {task_name!r} not in benchmark "
+                    f"suite {suite_name!r} (benchmark names: {benchmark_names})"
+                )
+            bench_tid = name_to_bench_id[task_name]
             goals = []
             with h5py.File(path, "r", swmr=True, libver="latest") as raw_f:
                 for demo_key in _sorted_demo_keys(raw_f["data"]):
@@ -63,7 +135,12 @@ def _build_goal_bank(env_params):
                         goal[key] = np.asarray(latent_data[demo_id]["latent"][latent_key][-1], dtype=np.float32)
                     goals.append(goal)
             if goals:
-                goal_bank[task_id] = goals
+                if bench_tid in goal_bank:
+                    raise RuntimeError(
+                        f"two demo files map to benchmark task_id {bench_tid} "
+                        f"({task_name!r})"
+                    )
+                goal_bank[bench_tid] = goals
     if not goal_bank:
         raise ValueError(f"No goal latents found in {latent_path}")
     return goal_bank
@@ -91,6 +168,7 @@ class LiberoEvalProc:
         obs_horizon: int,
         rgb_viz: str,
         terminal_queue: mp.Queue,
+        task_id_per_seed: List[int],
         mp_context=None,
     ):
         self.seeds = seeds
@@ -99,6 +177,12 @@ class LiberoEvalProc:
         self.obs_horizon = obs_horizon
         self.rgb_viz = rgb_viz
         self.terminal_queue = terminal_queue
+        # explicit per-rollout task assignment built by run_libero_eval; keeps
+        # task coverage decoupled from worker count (previously every worker
+        # ran s_idx % len(task_ids), which masked tasks 4..9 when n_eval was
+        # smaller than n_tasks * n_proc).
+        assert len(task_id_per_seed) == len(seeds)
+        self.task_id_per_seed = [int(t) for t in task_id_per_seed]
         mp_context = mp_context or mp
         self.send_queue = mp_context.Queue()
         self.recv_queue = mp_context.Queue()
@@ -107,17 +191,9 @@ class LiberoEvalProc:
         try:
             from envs.libero_remote_env import LiberoRemoteEnv
 
-            # accept either a single task_id or a list of task_ids; cycle through
-            task_ids = self.env_kwargs.get("task_ids")
-            if task_ids is None:
-                task_ids = [self.env_kwargs.get("task_id", 0)]
-            task_ids = list(task_ids)
-
             results = {}
             for s_idx, seed in enumerate(self.seeds):
-                # rotate task selection across seeds so a worker covers
-                # multiple tasks rather than spawning one env per task
-                task_id = int(task_ids[s_idx % len(task_ids)])
+                task_id = self.task_id_per_seed[s_idx]
                 # one env per (worker, task). Cache the env across consecutive
                 # rollouts on the same task to avoid subprocess startup cost.
                 if (
@@ -225,11 +301,28 @@ def run_libero_eval(
     use_goal_cond = bool(getattr(policy, "config", {}).get("use_goal_cond", False))
     goal_bank = _build_goal_bank(env_params) if use_goal_cond else None
 
+    # Pre-allocate task_id per global rollout, grouped by task so each worker
+    # sees contiguous task blocks (minimizes libero subprocess churn). With
+    # this layout every task in env_kwargs['task_ids'] receives at least
+    # floor(n_rollout / n_tasks) rollouts; remaining episodes are spread over
+    # the first few tasks. Previously LiberoEvalProc itself did s_idx % len,
+    # which silently capped coverage at rollouts_per_proc tasks.
+    task_id_pool = list(env_kwargs.get("task_ids") or [env_kwargs.get("task_id", 0)])
+    n_tasks = len(task_id_pool)
+    base_per_task = n_rollout // n_tasks
+    extras = n_rollout - base_per_task * n_tasks
+    task_id_per_rollout: List[int] = []
+    for i, tid in enumerate(task_id_pool):
+        count = base_per_task + (1 if i < extras else 0)
+        task_id_per_rollout.extend([int(tid)] * count)
+    assert len(task_id_per_rollout) == n_rollout
+
     mp_context = mp.get_context("spawn")
     terminal_queue = mp_context.Queue()
     procs = []
     for i in range(n_proc):
         seeds = list(range(seed + i * rollouts_per_proc, seed + (i + 1) * rollouts_per_proc))
+        proc_tasks = task_id_per_rollout[i * rollouts_per_proc : (i + 1) * rollouts_per_proc]
         procs.append(
             LiberoEvalProc(
                 seeds=seeds,
@@ -238,6 +331,7 @@ def run_libero_eval(
                 obs_horizon=obs_horizon,
                 rgb_viz=rgb_viz,
                 terminal_queue=terminal_queue,
+                task_id_per_seed=proc_tasks,
                 mp_context=mp_context,
             )
         )

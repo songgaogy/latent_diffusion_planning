@@ -44,10 +44,10 @@ use_tb: true
 use_wandb: false
 name: train_libero_long
 
-# Override agent fields. Default agent yaml uses vae_feature_dim=16.
+# Override agent fields. Default agent yaml uses  v=16.
 # Current LIBERO VAE has 6 down blocks, so 256x256 images produce 8x8x4=256 latents.
 agent:
-  vae_feature_dim: 256
+  vae_feature_dim: 64
   vae_pretrain_path: null
   use_goal_cond: true
   goal_rgb_obs: ${data.meta.goal_rgb_obs}

@@ -1,5 +1,5 @@
 _target_: data.libero_data.LiberoData
-name: libero_long_img256_data
+name: libero_long_img64_data
 
 # infra
 batch_size: ${batch_size}
@@ -28,8 +28,8 @@ meta:
       ee_states: [6]
       gripper_states: [2]
       joint_states: [7]
-      agentview_rgb: [256, 256, 3]
-      eye_in_hand_rgb: [256, 256, 3]
+      agentview_rgb: [64, 64, 3]
+      eye_in_hand_rgb: [64, 64, 3]
       optimal: [1]
     use_images: True
   # bounds computed by scripts/compute_libero_obs_norm.py over all 10 libero_10 hdf5s
@@ -57,7 +57,7 @@ env_params:
     lowdim_obs: ${data.meta.lowdim_obs}
     rgb_obs: ${data.meta.rgb_obs}
     camera_names: [agentview, robot0_eye_in_hand]
-    camera_heights: 256
-    camera_widths: 256
+    camera_heights: 64
+    camera_widths: 64
     controller: OSC_POSE
     horizon: 600

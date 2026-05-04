@@ -93,6 +93,8 @@ class ConditionalResidualBlock1D(nn.Module):
         ])(cond)
         embed = jnp.expand_dims(embed, axis=1) # (B, 1, 2 * D)
         scale, bias = jnp.split(embed, 2, axis=-1) # (B, D)
+
+        # FiLM
         out = scale * out + bias
         out = Conv1dBlock(self.out_channels, self.kernel_size, self.n_groups)(out)
         

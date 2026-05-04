@@ -80,15 +80,16 @@ def test_sample_shapes():
         n_overfit=None,
         optimal=1,
         per_file_n_overfit=2,
+        rgb_shapes={"agentview_rgb": (64, 64, 3), "eye_in_hand_rgb": (64, 64, 3)},
     )
     expected_obs_T = obs_horizon + seq_length - 1
     s = ds.get_item(0)
     assert s["actions"].shape == (seq_length, 7), s["actions"].shape
     assert s["obs"]["ee_states"].shape == (expected_obs_T, 6)
     assert s["obs"]["gripper_states"].shape == (expected_obs_T, 2)
-    assert s["obs"]["agentview_rgb"].shape == (expected_obs_T, 256, 256, 3)
+    assert s["obs"]["agentview_rgb"].shape == (expected_obs_T, 64, 64, 3)
     assert s["obs"]["agentview_rgb"].dtype == np.uint8
-    assert s["obs"]["eye_in_hand_rgb"].shape == (expected_obs_T, 256, 256, 3)
+    assert s["obs"]["eye_in_hand_rgb"].shape == (expected_obs_T, 64, 64, 3)
 
 
 def test_iter_demo_obs():
@@ -104,6 +105,7 @@ def test_iter_demo_obs():
         n_overfit=None,
         optimal=1,
         per_file_n_overfit=1,
+        rgb_shapes={"agentview_rgb": (64, 64, 3)},
     )
     seen = []
     for demo_id, obs in ds.iter_demo_obs(["agentview_rgb"]):
@@ -111,7 +113,7 @@ def test_iter_demo_obs():
     assert len(seen) == 1
     demo_id, shape = seen[0]
     assert "__demo_" in demo_id, demo_id
-    assert shape[1:] == (256, 256, 3) and shape[0] > 0
+    assert shape[1:] == (64, 64, 3) and shape[0] > 0
 
 
 def test_libero_data_wrapper_dataloader():
@@ -127,7 +129,7 @@ def test_libero_data_wrapper_dataloader():
                 all_shapes=dict(
                     ee_states=[6],
                     gripper_states=[2],
-                    agentview_rgb=[256, 256, 3],
+                    agentview_rgb=[64, 64, 3],
                     optimal=[1],
                 ),
                 use_images=True,
@@ -165,7 +167,7 @@ def test_libero_data_wrapper_dataloader():
     it = iter(loader)
     batch = next(it)
     assert batch["actions"].shape == (2, 9, 7)
-    assert batch["obs"]["agentview_rgb"].shape == (2, 10, 256, 256, 3)
+    assert batch["obs"]["agentview_rgb"].shape == (2, 10, 64, 64, 3)
     assert data.name.startswith("libero")
 
 

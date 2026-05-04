@@ -48,6 +48,11 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument(
+        "--rgb-key",
+        default=None,
+        help="Latent RGB key to visualize. Defaults to data.meta.rgb_viz, then the first agent rgb_obs.",
+    )
     return parser.parse_args()
 
 
@@ -97,6 +102,82 @@ def stack_numpy_tree(samples):
     return np.ascontiguousarray(np.stack(samples, axis=0))
 
 
+def _flatten_feature_window(value: np.ndarray, feature_dim: int, key: str) -> tuple[np.ndarray, int]:
+    """Flatten a latent obs window and keep the feature dims used by the planner."""
+    arr = np.asarray(value)
+    if arr.ndim < 3:
+        raise ValueError(f"{key} must have at least (B, H, features), got {arr.shape}")
+    flat = arr.reshape(arr.shape[0], arr.shape[1], -1)
+    if flat.shape[-1] < feature_dim:
+        raise ValueError(
+            f"{key} has only {flat.shape[-1]} flat latent dims, but agent.vae_feature_dim={feature_dim}"
+        )
+    return np.ascontiguousarray(flat[..., :feature_dim]), flat.shape[-1]
+
+
+def _flatten_feature_goal(value: np.ndarray, feature_dim: int, key: str) -> tuple[np.ndarray, int]:
+    """Flatten a per-demo goal latent and keep the feature dims used by the planner."""
+    arr = np.asarray(value)
+    if arr.ndim < 2:
+        raise ValueError(f"{key} goal must have at least (B, features), got {arr.shape}")
+    flat = arr.reshape(arr.shape[0], -1)
+    if flat.shape[-1] < feature_dim:
+        raise ValueError(
+            f"{key} goal has only {flat.shape[-1]} flat latent dims, but agent.vae_feature_dim={feature_dim}"
+        )
+    return np.ascontiguousarray(flat[..., :feature_dim]), flat.shape[-1]
+
+
+def prepare_agent_batch(batch, cfg, data=None):
+    """Match dataset latents to the planner feature dimensionality.
+
+    LIBERO 64x64 VAE latents are commonly stored as (8, 8, 4), i.e. 256 flat
+    dims per camera. Some planner checkpoints intentionally use only the first
+    vae_feature_dim dims. The training path used to allow that implicitly; the
+    current agent validates shapes during init, so visualization must present
+    the same truncated view to both agent initialization and sampling.
+    """
+    feature_dim = int(cfg.agent.vae_feature_dim)
+    rgb_obs = list(cfg.agent.rgb_obs)
+    goal_rgb_obs = list(getattr(cfg.agent, "goal_rgb_obs", []))
+
+    out = {}
+    raw_dims = {}
+    for key, value in batch.items():
+        if key == "obs":
+            obs = dict(value)
+            for rgb_key in rgb_obs:
+                if rgb_key in obs:
+                    obs[rgb_key], raw_dim = _flatten_feature_window(obs[rgb_key], feature_dim, rgb_key)
+                    raw_dims[rgb_key] = raw_dim
+            out[key] = obs
+        elif key == "goal_obs":
+            goal_obs = dict(value)
+            for rgb_key in goal_rgb_obs:
+                if rgb_key in goal_obs:
+                    goal_obs[rgb_key], raw_dim = _flatten_feature_goal(goal_obs[rgb_key], feature_dim, rgb_key)
+                    raw_dims.setdefault(rgb_key, raw_dim)
+            out[key] = goal_obs
+        else:
+            out[key] = value
+
+    with open_dict(cfg):
+        for key in set(rgb_obs + goal_rgb_obs):
+            if key in cfg.data.meta.shape_meta.all_shapes:
+                cfg.data.meta.shape_meta.all_shapes[key] = [feature_dim]
+    if data is not None:
+        for key in set(rgb_obs + goal_rgb_obs):
+            if key in data.shape_meta.all_shapes:
+                data.shape_meta.all_shapes[key] = [feature_dim]
+    if raw_dims:
+        summary = ", ".join(
+            f"{key}: {raw_dim}->{feature_dim}" if raw_dim != feature_dim else f"{key}: {feature_dim}"
+            for key, raw_dim in sorted(raw_dims.items())
+        )
+        print(f"[visualize] planner latent dims: {summary}")
+    return out
+
+
 def load_agent(cfg, data, init_batch, ckpt_path: Path):
     agent_cfg = OmegaConf.create(OmegaConf.to_container(cfg.agent, resolve=True))
     agent_target = agent_cfg.pop("_target_")
@@ -136,6 +217,30 @@ def load_agent(cfg, data, init_batch, ckpt_path: Path):
             )
         )
     return agent
+
+
+def resolve_rgb_key(cfg, requested_key):
+    rgb_obs = list(cfg.agent.rgb_obs)
+    if requested_key is not None:
+        if requested_key not in rgb_obs:
+            raise ValueError(f"--rgb-key={requested_key!r} is not in agent.rgb_obs={rgb_obs}")
+        return requested_key
+
+    rgb_viz = getattr(cfg.data.meta, "rgb_viz", None)
+    if rgb_viz in rgb_obs:
+        return rgb_viz
+    return rgb_obs[0]
+
+
+def decode_plan_camera(agent, plan, rgb_key):
+    rgb_obs = list(agent.config["rgb_obs"])
+    feature_dim = int(agent.config["vae_feature_dim"])
+    if rgb_key not in rgb_obs:
+        raise ValueError(f"rgb_key={rgb_key!r} is not in agent rgb_obs={rgb_obs}")
+    cam_idx = rgb_obs.index(rgb_key)
+    start = cam_idx * feature_dim
+    stop = start + feature_dim
+    return agent.vae_decode_full(plan[..., start:stop])
 
 
 def to_uint8_nhwc(decoded):
@@ -196,7 +301,8 @@ def main():
             f"Requested max index {max_index}, but dataset has {dataset.total_n_sequences} sequences."
         )
     samples = [dataset.get_item(args.start_index + i * args.stride) for i in range(args.num_samples)]
-    batch = stack_numpy_tree(samples)
+    raw_batch = stack_numpy_tree(samples)
+    batch = prepare_agent_batch(raw_batch, cfg, data)
 
     agent = load_agent(cfg, data, batch, ckpt_path)
     rng = jax.random.PRNGKey(args.seed)
@@ -207,14 +313,15 @@ def main():
     batch_norm = postprocess_batch(batch, agent.obs_normalization)
     obs_horizon = int(agent.config["obs_horizon"])
     action_horizon = int(agent.config["action_horizon"])
-    rgb_viz_key = agent.config["rgb_obs"][0]
+    rgb_viz_key = resolve_rgb_key(cfg, args.rgb_key)
     gt_latent = batch_norm["obs"][rgb_viz_key][
         :, obs_horizon - 1 : obs_horizon + action_horizon
     ]
     gt_viz = agent.vae_decode_full(gt_latent)
+    plan_viz = decode_plan_camera(agent, metrics["plan"], rgb_viz_key)
 
     gt_uint8 = to_uint8_nhwc(gt_viz)
-    plan_uint8 = to_uint8_nhwc(metrics["plan_viz"])
+    plan_uint8 = to_uint8_nhwc(plan_viz)
 
     output_dir = Path(args.output_dir) if args.output_dir else experiment_dir / "planner_viz" / ckpt_name
     if not output_dir.is_absolute():
@@ -223,7 +330,7 @@ def main():
 
     for i in range(args.num_samples):
         sample_index = args.start_index + i * args.stride
-        title = f"{experiment_dir.name} ckpt={ckpt_name} sample_index={sample_index}"
+        title = f"{experiment_dir.name} ckpt={ckpt_name} sample_index={sample_index} {rgb_viz_key}"
         image = make_pair_image(gt_uint8[i], plan_uint8[i], title)
         image.save(output_dir / f"sample_{i:03d}_idx_{sample_index}.png")
 

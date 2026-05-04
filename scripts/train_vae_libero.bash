@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train the SD-VAE on all 5 LIBERO suites (~5500 demos) at native 256x256.
+# Train the SD-VAE on all 5 LIBERO suites (~5500 demos) at 64x64.
 #
 # Override examples:
 #   bash scripts/train_vae_libero.bash experiment_name=run01 batch_size=8

@@ -8,8 +8,8 @@ experiment_folder: libero_long
 experiment_name: ldp_long01
 
 # train params
-batch_size: 64
-n_workers: 4
+batch_size: 1024
+n_workers: 16
 n_grad_steps: 500000
 log_every_step: 50
 dump_every_step: 200
@@ -44,10 +44,10 @@ use_tb: true
 use_wandb: false
 name: train_libero_long
 
-# Override agent fields. Default agent yaml uses  v=16.
-# Current LIBERO VAE has 6 down blocks, so 256x256 images produce 8x8x4=256 latents.
+# Override agent fields. Current LIBERO VAE has 6 down blocks, so 64x64 images
+# produce 2x2x4=16 latents.
 agent:
-  vae_feature_dim: 64
+  vae_feature_dim: 16
   vae_pretrain_path: null
   use_goal_cond: true
   goal_rgb_obs: ${data.meta.goal_rgb_obs}

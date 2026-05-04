@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 
 resolve_ldp_python() {
     if [[ -n "${PY:-}" ]]; then

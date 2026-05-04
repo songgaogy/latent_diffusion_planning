@@ -19,7 +19,7 @@ from networks.diffusion_nets_v2 import ConditionalUnet1D  # noqa: E402
 
 def test_two_camera_latent_shapes_rank3():
     B, H = 4, 3
-    latent_dim = 4096
+    latent_dim = 16
     lowdim_total = 6 + 2  # ee_states + gripper_states
     batch = {
         "latent_agentview_rgb": jnp.zeros((B, H, latent_dim), dtype=jnp.float32),
@@ -37,16 +37,16 @@ def test_two_camera_latent_shapes_rank3():
 
 
 def test_two_camera_latent_shapes_rank5():
-    """Pre-encoded latents from disk: shape (B, H, latent_C, latent_H, latent_W)."""
+    """Pre-encoded latents from disk: shape (B, H, latent_H, latent_W, latent_C)."""
     B, H = 4, 3
-    latent_C, latent_H, latent_W = 4, 32, 32
-    flat = latent_C * latent_H * latent_W
+    latent_H, latent_W, latent_C = 2, 2, 4
+    flat = latent_H * latent_W * latent_C
     batch = {
         "latent_agentview_rgb": jnp.zeros(
-            (B, H, latent_C, latent_H, latent_W), dtype=jnp.float32
+            (B, H, latent_H, latent_W, latent_C), dtype=jnp.float32
         ),
         "latent_eye_in_hand_rgb": jnp.zeros(
-            (B, H, latent_C, latent_H, latent_W), dtype=jnp.float32
+            (B, H, latent_H, latent_W, latent_C), dtype=jnp.float32
         ),
         "ee_states": jnp.zeros((B, H, 6), dtype=jnp.float32),
         "gripper_states": jnp.zeros((B, H, 2), dtype=jnp.float32),
@@ -94,18 +94,18 @@ def test_temporal_alignment_preserved():
         assert np.allclose(cam2_slice, t + 100), f"t={t}: cam2 slice {cam2_slice}"
 
 
-def test_vae_decode_dim_table_recognises_new_cases():
-    # cheap sanity: source contains the literal new branches
+def test_ldp_agent_uses_direct_latent_flattening():
+    # cheap sanity: the LIBERO spatial projection path was removed.
     src = (REPO_ROOT / "agent" / "ldp_agent.py").read_text()
-    for dim in (256, 1024, 4096):
-        assert f"vae_feature_dim'] == {dim}" in src, dim
+    assert "_spatial_project_latent" not in src
+    assert "vae_feature_dim'] == 16" in src
 
 
 def test_goal_cond_two_camera_shapes():
     B = 4
-    D = 256
+    D = 16
     goal_obs = {
-        "latent_agentview_rgb": jnp.zeros((B, 8, 8, 4), dtype=jnp.float32),
+        "latent_agentview_rgb": jnp.zeros((B, 2, 2, 4), dtype=jnp.float32),
         "latent_eye_in_hand_rgb": jnp.zeros((B, D), dtype=jnp.float32),
     }
     out = LDPAgent._get_goal_cond(
@@ -143,7 +143,7 @@ if __name__ == "__main__":
         test_two_camera_latent_shapes_rank3,
         test_two_camera_latent_shapes_rank5,
         test_temporal_alignment_preserved,
-        test_vae_decode_dim_table_recognises_new_cases,
+        test_ldp_agent_uses_direct_latent_flattening,
         test_goal_cond_two_camera_shapes,
         test_conditional_unet_goal_cond_forward,
     ]

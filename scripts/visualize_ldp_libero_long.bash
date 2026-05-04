@@ -4,6 +4,7 @@
 # Useful overrides:
 #   CHECKPOINT=450000 NUM_SAMPLES=16 START_INDEX=100 STRIDE=10 bash scripts/visualize_ldp_libero_long.bash
 #   OUT_DIR=/tmp/ldp_viz BATCH_SIZE=4 SEED=7 bash scripts/visualize_ldp_libero_long.bash
+#   RGB_KEY=latent_eye_in_hand_rgb bash scripts/visualize_ldp_libero_long.bash
 #   bash scripts/visualize_ldp_libero_long.bash --checkpoint 400000 --num-samples 2
 
 set -euo pipefail
@@ -16,11 +17,11 @@ export HYDRA_FULL_ERROR=1
 source scripts/env_helpers.bash
 PY="$(resolve_ldp_python)"
 
-EXPERIMENT_DIR=${EXPERIMENT_DIR:-experiments/libero_long/ldp_goal_cond_v3}
+EXPERIMENT_DIR=${EXPERIMENT_DIR:-experiments/libero_long/ldp_goal_cond_64_v0}
 CHECKPOINT=${CHECKPOINT:-latest}        # either "latest" or a numeric step
 NUM_SAMPLES=${NUM_SAMPLES:-8}
 START_INDEX=${START_INDEX:-0}
-STRIDE=${STRIDE:-1}
+STRIDE=${STRIDE:-15}
 SEED=${SEED:-1}
 
 ARGS=(
@@ -38,6 +39,10 @@ fi
 
 if [[ -n "${OUT_DIR:-}" ]]; then
     ARGS+=(--output-dir "$OUT_DIR")
+fi
+
+if [[ -n "${RGB_KEY:-}" ]]; then
+    ARGS+=(--rgb-key "$RGB_KEY")
 fi
 
 set -x

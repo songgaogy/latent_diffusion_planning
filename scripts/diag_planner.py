@@ -22,7 +22,7 @@ from pathlib import Path
 hydra.core.global_hydra.GlobalHydra.instance().clear()
 with hydra.initialize(version_base=None, config_path="."):
     cfg = hydra.compose(config_name="train_libero_long", overrides=[
-        f"agent.vae_pretrain_path={os.path.abspath('experiments/libero_vae/vae_all256/ckpt/200000.ckpt')}",
+        f"agent.vae_pretrain_path={os.path.abspath('experiments/libero_vae/vae_all64/ckpt/200000.ckpt')}",
         f"data.train_latent_path={os.path.abspath('experiments/libero_long/preproc01/latent.hdf5')}",
         "n_workers=0",
         "batch_size=8",

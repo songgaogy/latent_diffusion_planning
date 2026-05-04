@@ -94,15 +94,9 @@ class Workspace:
         vae_params = jax.tree_util.tree_map(lambda x: jax.device_put(x, jax.devices('gpu')[0]), vae_params)
 
         @jax.jit
-        def resize_original(obs):
-            obs_resize = jax.image.resize(image=obs, shape=(3,256,256), method="bilinear")
-            return obs_resize
-
-        @jax.jit
         def encode(obs):
             z = vae_module.apply({"params": vae_params}, obs, method=vae_module.encode)['latent_dist'].mean
             return z
-        resize = jax.vmap(resize_original)
 
         data = self.data.train_dataset
         min_z, max_z = 0, 0
@@ -121,7 +115,12 @@ class Workspace:
                 obs_arr = (obs_arr - 0.5) / 0.5
                 obs_arr = obs_arr.transpose(0,3,1,2)
                 if self.cfg.pretrain_path is not None:
-                    obs_arr = resize(obs_arr)
+                    target_shape = tuple(self.cfg.data.meta.shape_meta.all_shapes[rgb_key])
+                    obs_arr = jax.image.resize(
+                        image=obs_arr,
+                        shape=(obs_arr.shape[0], target_shape[2], target_shape[0], target_shape[1]),
+                        method="bilinear",
+                    )
                 # encode with shards of size self.cfg.shard
                 zs = []
                 for i in range(0, len(obs_arr), self.cfg.shard):
@@ -131,10 +130,7 @@ class Workspace:
                         # reconstruct = vae_module.apply({"params": vae_params}, z, method=vae_module.decode).sample
                     else:
                         n_extra = self.cfg.shard - sharded.shape[0]
-                        if self.cfg.pretrain_path is not None:
-                            pad = jnp.zeros((n_extra, 3, 256, 256))
-                        else:
-                            pad = jnp.zeros((n_extra, 3, sharded.shape[-1], sharded.shape[-1]))
+                        pad = jnp.zeros((n_extra, *sharded.shape[1:]), dtype=sharded.dtype)
                         sharded_pad = jnp.concatenate([sharded, pad], axis=0)
                         z = encode(sharded_pad)
                         z = z[:sharded.shape[0]]
@@ -163,15 +159,9 @@ class Workspace:
         vae_params = jax.tree_util.tree_map(lambda x: jax.device_put(x, jax.devices('gpu')[0]), vae_params)
 
         @jax.jit
-        def resize_original(obs):
-            obs_resize = jax.image.resize(image=obs, shape=(3,256,256), method="bilinear")
-            return obs_resize
-
-        @jax.jit
         def encode(obs):
             z = vae_module.apply({"params": vae_params}, obs, method=vae_module.encode)['latent_dist'].mean
             return z
-        resize = jax.vmap(resize_original)
 
         data = self.data.train_dataset
         min_z, max_z = 0, 0
@@ -186,7 +176,12 @@ class Workspace:
                 obs_arr = (obs_arr - 0.5) / 0.5
                 obs_arr = obs_arr.transpose(0,3,1,2)
                 if self.cfg.pretrain_path is not None:
-                    obs_arr = resize(obs_arr)
+                    target_shape = tuple(self.cfg.data.meta.shape_meta.all_shapes[rgb_key])
+                    obs_arr = jax.image.resize(
+                        image=obs_arr,
+                        shape=(obs_arr.shape[0], target_shape[2], target_shape[0], target_shape[1]),
+                        method="bilinear",
+                    )
                 # encode with shards of size self.cfg.shard
                 zs = []
                 for i in range(0, len(obs_arr), self.cfg.shard):
@@ -196,10 +191,7 @@ class Workspace:
                         # reconstruct = vae_module.apply({"params": vae_params}, z, method=vae_module.decode).sample
                     else:
                         n_extra = self.cfg.shard - sharded.shape[0]
-                        if self.cfg.pretrain_path is not None:
-                            pad = jnp.zeros((n_extra, 3, 256, 256))
-                        else:
-                            pad = jnp.zeros((n_extra, 3, sharded.shape[-1], sharded.shape[-1]))
+                        pad = jnp.zeros((n_extra, *sharded.shape[1:]), dtype=sharded.dtype)
                         sharded_pad = jnp.concatenate([sharded, pad], axis=0)
                         z = encode(sharded_pad)
                         z = z[:sharded.shape[0]]
@@ -230,15 +222,9 @@ class Workspace:
         vae_params = jax.tree_util.tree_map(lambda x: jax.device_put(x, jax.devices('gpu')[0]), vae_params)
 
         @jax.jit
-        def resize_original(obs):
-            obs_resize = jax.image.resize(image=obs, shape=(3, 256, 256), method="bilinear")
-            return obs_resize
-
-        @jax.jit
         def encode(obs):
             z = vae_module.apply({"params": vae_params}, obs, method=vae_module.encode)['latent_dist'].mean
             return z
-        resize = jax.vmap(resize_original)
 
         data = self.data.train_dataset
         rgb_keys = list(data.rgb_keys)
@@ -257,7 +243,12 @@ class Workspace:
                 obs_arr = (obs_arr - 0.5) / 0.5
                 obs_arr = obs_arr.transpose(0, 3, 1, 2)
                 if self.cfg.pretrain_path is not None:
-                    obs_arr = resize(obs_arr)
+                    target_shape = tuple(self.cfg.data.meta.shape_meta.all_shapes[rgb_key])
+                    obs_arr = jax.image.resize(
+                        image=obs_arr,
+                        shape=(obs_arr.shape[0], target_shape[2], target_shape[0], target_shape[1]),
+                        method="bilinear",
+                    )
 
                 zs = []
                 for i in range(0, len(obs_arr), self.cfg.shard):
@@ -266,10 +257,7 @@ class Workspace:
                         z = encode(sharded)
                     else:
                         n_extra = self.cfg.shard - sharded.shape[0]
-                        if self.cfg.pretrain_path is not None:
-                            pad = jnp.zeros((n_extra, 3, 256, 256))
-                        else:
-                            pad = jnp.zeros((n_extra, 3, sharded.shape[-1], sharded.shape[-1]))
+                        pad = jnp.zeros((n_extra, *sharded.shape[1:]), dtype=sharded.dtype)
                         sharded_pad = jnp.concatenate([sharded, pad], axis=0)
                         z = encode(sharded_pad)
                         z = z[:sharded.shape[0]]

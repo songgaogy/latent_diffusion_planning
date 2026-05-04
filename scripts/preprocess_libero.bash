@@ -6,12 +6,12 @@
 # Required:
 #   restore_snapshot_path=PATH_TO_VAE_CKPT  (full absolute path to a numbered
 #                                            ckpt directory, e.g.
-#                                            experiments/libero_vae/vae_all256/ckpt/100000.ckpt)
+#                                            experiments/libero_vae/vae_all64/ckpt/100000.ckpt)
 #
 # Override examples:
 #   bash scripts/preprocess_libero.bash \
 #       experiment_folder=libero_long experiment_name=preproc01 \
-#       restore_snapshot_path=$(pwd)/experiments/libero_vae/vae_all256/ckpt/100000.ckpt
+#       restore_snapshot_path=$(pwd)/experiments/libero_vae/vae_all64/ckpt/100000.ckpt
 #
 # After this finishes, run:
 #   source scripts/env_helpers.bash

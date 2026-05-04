@@ -3,7 +3,7 @@
 #
 # Required overrides:
 #   agent.vae_pretrain_path=PATH_TO_VAE_CKPT  - the SD-VAE checkpoint trained
-#       on libero_all (e.g. experiments/libero_vae/vae_all256/ckpt/100000.ckpt)
+#       on libero_all (e.g. experiments/libero_vae/vae_all64/ckpt/100000.ckpt)
 #   data.train_latent_path=PATH_TO_LATENT_HDF5 - latent.hdf5 produced by
 #       scripts/preprocess_libero.bash
 #
@@ -14,7 +14,7 @@
 # Override examples:
 #   bash scripts/train_ldp_libero_long.bash \
 #       experiment_name=run01 \
-#       agent.vae_pretrain_path=$(pwd)/experiments/libero_vae/vae_all256/ckpt/100000.ckpt \
+#       agent.vae_pretrain_path=$(pwd)/experiments/libero_vae/vae_all64/ckpt/100000.ckpt \
 #       data.train_latent_path=$(pwd)/experiments/libero_long/preproc01/latent.hdf5
 
 set -euo pipefail

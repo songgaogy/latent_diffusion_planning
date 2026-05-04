@@ -3,7 +3,7 @@
 Mirrors data/alohasim_data.py (no `next_obs`) but:
   * loads from many hdf5 files (a glob over LIBERO suite directories);
   * uses lazy hdf5 reads on every sample to avoid welding ~100k+ frames of
-    256x256x3 imagery into RAM;
+    high-resolution imagery into RAM;
   * builds globally unique demo ids of the form ``"{file_stem}__{demo_key}"``
     so latent.hdf5 groups never collide across the 130 task files;
   * tolerates missing ``num_samples`` attrs (LIBERO hdf5s leave demo attrs
@@ -353,7 +353,7 @@ class LiberoDataset(torch.utils.data.IterableDataset):
         for demo_idx, (path, dk, L, _) in enumerate(self.demos):
             f = self._get_file(path)
             demo_grp = f["data"][dk]
-            out = {k: demo_grp["obs"][k][:] for k in rgb_keys}
+            out = {k: self._resize_rgb_if_needed(k, demo_grp["obs"][k][:]) for k in rgb_keys}
             yield self.demo_ids[demo_idx], out
 
     def __iter__(self):

@@ -5,10 +5,10 @@ defaults:
 
 # experiment
 experiment_folder: libero_vae
-experiment_name: vae_all256
+experiment_name: vae_all64
 
-# train params (256x256 imgs are 16x heavier than rm_lift's 64x64; lower the bs)
-batch_size: 64
+# train params
+batch_size: 256
 n_workers: 16
 device_prefetch_size: 4
 n_grad_steps: 300000

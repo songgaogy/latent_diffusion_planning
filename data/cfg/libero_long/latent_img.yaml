@@ -1,5 +1,5 @@
 _target_: data.libero_latent_data.LiberoLatentData
-name: libero_long_latent256_data
+name: libero_long_latent64_data
 
 # infra
 batch_size: ${batch_size}
@@ -32,11 +32,11 @@ meta:
       ee_states: [6]
       gripper_states: [2]
       joint_states: [7]
-      agentview_rgb: [256, 256, 3]
-      eye_in_hand_rgb: [256, 256, 3]
-      # Current LIBERO VAE uses 6 down blocks: 256x256 -> 8x8x4 latent.
-      latent_agentview_rgb: [256]
-      latent_eye_in_hand_rgb: [256]
+      agentview_rgb: [64, 64, 3]
+      eye_in_hand_rgb: [64, 64, 3]
+      # Current LIBERO VAE uses 6 down blocks: 64x64 -> 2x2x4 latent.
+      latent_agentview_rgb: [16]
+      latent_eye_in_hand_rgb: [16]
       optimal: [1]
     use_images: True
   obs_normalization:
@@ -48,8 +48,12 @@ meta:
         min: [-0.001,   -0.04112]
         max: [ 0.04158,  0.00136]
       # Fill after preprocessing with scripts/compute_libero_latent_stats.py.
-      latent_agentview_rgb:   {min: -5.7106, max: 5.7279}
-      latent_eye_in_hand_rgb: {min: -6.5991, max: 6.4220}
+      latent_agentview_rgb:
+        min: -4.3081
+        max: 4.2016
+      latent_eye_in_hand_rgb:
+        min: -5.1463
+        max: 5.5834
       optimal: {min: 0, max: 1}
     actions:
       clip_min: -1
@@ -68,7 +72,7 @@ env_params:
     lowdim_obs: ${data.meta.lowdim_obs}
     rgb_obs: [agentview_rgb, eye_in_hand_rgb]
     camera_names: [agentview, robot0_eye_in_hand]
-    camera_heights: 256
-    camera_widths: 256
+    camera_heights: 64
+    camera_widths: 64
     controller: OSC_POSE
     horizon: 600
